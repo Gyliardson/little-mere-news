@@ -1,0 +1,27 @@
+# Little Mere News - .gitignore
+# Hyper-V Infrastructure (Large generated files)
+
+# Virtual Disks
+Infrastructure/VMs/**/*.vhdx
+Infrastructure/VMs/**/*.avhdx
+
+# ISOs
+Infrastructure/ISO/
+
+# Hyper-V Snapshots and Checkpoints
+Infrastructure/VMs/**/Snapshots/
+Infrastructure/VMs/**/Virtual Machines/
+
+# Python Environments
+Backend-Harvester/harvester-env/
+Backend-Publisher/publisher-env/
+**/__pycache__/
+*.pyc
+venv/
+.env
+.env.local
+!.env.example
+
+# Logs and Temp files
+*.log
+serve_key.py

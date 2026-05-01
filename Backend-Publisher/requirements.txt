@@ -1,0 +1,2 @@
+supabase==2.29.0
+requests==2.33.1

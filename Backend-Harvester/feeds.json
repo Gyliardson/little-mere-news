@@ -1,0 +1,15 @@
+{
+    "AI": [
+        "https://hnrss.org/newest?q=LLM",
+        "https://www.technologyreview.com/feed/",
+        "https://huggingface.co/blog/feed.xml"
+    ],
+    "Gaming": [
+        "https://www.minecraft.net/en-us/article.rss",
+        "https://www.gamedeveloper.com/rss.xml"
+    ],
+    "Dev": [
+        "https://dev.to/feed",
+        "https://www.tabnews.com.br/recentes.rss"
+    ]
+}
