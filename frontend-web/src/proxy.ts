@@ -24,7 +24,7 @@ export function proxy(request: NextRequest) {
 
 export const config = {
   matcher: [
-    // Skip all internal paths (_next) and public folder files
-    '/((?!_next|logo.png|favicon.ico).*)',
+    // Skip all internal paths (_next), api routes, and public folder files
+    '/((?!api|_next|logo.png|favicon.ico).*)',
   ],
 }
