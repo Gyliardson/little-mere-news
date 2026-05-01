@@ -1,7 +1,7 @@
 # Little Mere News
 
-[![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/yourusername/little-mere-news/blob/main/README.md)
-[![pt-br](https://img.shields.io/badge/lang-pt--br-green.svg)](https://github.com/yourusername/little-mere-news/blob/main/README.pt-br.md)
+[![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/Gyliardson/little-mere-news/blob/main/README.md)
+[![pt-br](https://img.shields.io/badge/lang-pt--br-green.svg)](https://github.com/Gyliardson/little-mere-news/blob/main/README.pt-br.md)
 
 An automated, bilingual technology news platform utilizing Local Artificial Intelligence (LLMs) and on-demand batch processing to minimize cloud operational costs.
 
