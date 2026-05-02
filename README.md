@@ -101,14 +101,45 @@ The dashboard provides real-time metrics and full CRUD capabilities through mode
 
 The project is modularized to reflect its microservices architecture:
 
-* `/Infrastructure`: Idempotent PowerShell and Bash scripts utilized to provision the Hyper-V environment and the Batch Orchestrator. Scripts are standardized in English.
-* `/Backend-Harvester`: Python codebase responsible for polling RSS feeds and technology website APIs to extract raw articles.
-* `/Backend-Publisher`: Python codebase that receives processed text and performs sanitized Upserts into the Supabase relational tables.
-* `/Frontend-Web`: The user interface and SSR application hosted on Render, dynamically consuming data directly from the Supabase endpoint.
+```
+Little Mere News/
+├── Infrastructure/          # Provisioning scripts & one-click installer
+│   ├── Install-LMN.bat      # ← START HERE (One-click installer)
+│   ├── Install-LMN.ps1      # Unified installer orchestrator
+│   ├── Setup-LMN-Infra...   # Hyper-V, network & VM provisioning
+│   ├── Run-LMN.bat           # Batch launcher (Desktop shortcut target)
+│   ├── Run-LMN-Batch.ps1     # Pipeline orchestrator (VMs → Scrape → AI → Upload)
+│   └── setup_*.sh            # Linux provisioning scripts (executed inside VMs)
+├── Backend-Harvester/       # Python: RSS/API scraping & data collection
+├── Backend-Publisher/       # Python: Supabase upsert client
+└── Frontend-Web/            # Next.js SSR portal & admin CMS
+```
 
 ## Setup & Configuration
 
-This project relies on environment variables for both the local infrastructure and the cloud-hosted frontend.
+### Quick Start (One-Click Installer)
+
+The project includes a unified installer that automates the entire local infrastructure setup:
+
+1. Clone the repository.
+2. Configure your environment variables (see steps below).
+3. Navigate to the `Infrastructure/` folder.
+4. **Double-click `Install-LMN.bat`.**
+
+The installer will automatically:
+- Request Administrator privileges (UAC prompt).
+- Enable Hyper-V (if not already active — requires reboot).
+- Create the internal virtual network (`LMN-Internal-Switch`).
+- Download the Ubuntu Server 24.04 LTS ISO (~2.6 GB).
+- Provision 3 Generation 2 VMs (Harvester, Brain, Publisher).
+- Create a Desktop shortcut with the project icon for daily batch execution.
+
+> **Dry Run Mode:** To test the installer without making system changes, run the following in an elevated PowerShell session:
+> ```powershell
+> powershell -NoProfile -ExecutionPolicy Bypass -File ".\Infrastructure\Install-LMN.ps1" -DryRun
+> ```
+
+After installation, use the **"Little Mere News - Batch"** shortcut on your Desktop to run the daily news processing pipeline.
 
 ### 1. Root Infrastructure (.env)
 Used by PowerShell and Python scripts to communicate with Supabase.

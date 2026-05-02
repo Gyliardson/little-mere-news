@@ -101,14 +101,45 @@ O painel fornece métricas em tempo real e recursos completos de CRUD por meio d
 
 O projeto é modularizado para refletir sua arquitetura de microsserviços:
 
-* `/Infrastructure`: Scripts Bash e PowerShell idempotentes usados para provisionar o ambiente Hyper-V e o Orquestrador. Os scripts foram padronizados para o Inglês.
-* `/Backend-Harvester`: Código Python responsável por ler feeds RSS e APIs de sites de tecnologia para extrair os artigos originais.
-* `/Backend-Publisher`: Código Python que recebe o texto processado e realiza a inserção segura (Upsert) nas tabelas relacionais do Supabase.
-* `/Frontend-Web`: A interface de usuário e aplicação SSR hospedada no Render, consumindo os dados diretamente da API do Supabase.
+```
+Little Mere News/
+├── Infrastructure/          # Scripts de provisionamento e instalador
+│   ├── Install-LMN.bat      # ← COMECE AQUI (Instalador com um clique)
+│   ├── Install-LMN.ps1      # Orquestrador unificado do instalador
+│   ├── Setup-LMN-Infra...   # Provisionamento: Hyper-V, rede e VMs
+│   ├── Run-LMN.bat           # Launcher do batch (atalho do Desktop)
+│   ├── Run-LMN-Batch.ps1     # Orquestrador do pipeline (VMs → Coleta → IA → Upload)
+│   └── setup_*.sh            # Scripts de provisionamento Linux (executados dentro das VMs)
+├── Backend-Harvester/       # Python: Coleta de dados via RSS/APIs
+├── Backend-Publisher/       # Python: Cliente de upsert para o Supabase
+└── Frontend-Web/            # Portal Next.js SSR e CMS administrativo
+```
 
 ## Setup e Configuração
 
-Este projeto depende de variáveis de ambiente tanto para a infraestrutura local quanto para o frontend hospedado na nuvem.
+### Início Rápido (Instalador com Um Clique)
+
+O projeto inclui um instalador unificado que automatiza toda a configuração da infraestrutura local:
+
+1. Clone o repositório.
+2. Configure suas variáveis de ambiente (veja os passos abaixo).
+3. Navegue até a pasta `Infrastructure/`.
+4. **Dê dois cliques em `Install-LMN.bat`.**
+
+O instalador irá automaticamente:
+- Solicitar permissão de Administrador (janela UAC).
+- Habilitar o Hyper-V (se ainda não estiver ativo — requer reinicialização).
+- Criar a rede virtual interna (`LMN-Internal-Switch`).
+- Baixar a ISO do Ubuntu Server 24.04 LTS (~2.6 GB).
+- Provisionar 3 VMs Geração 2 (Harvester, Brain, Publisher).
+- Criar um atalho na Área de Trabalho com o ícone do projeto para execução diária.
+
+> **Modo de Teste (Dry Run):** Para testar o instalador sem fazer alterações no sistema, execute o seguinte comando em um PowerShell elevado (como Administrador):
+> ```powershell
+> powershell -NoProfile -ExecutionPolicy Bypass -File ".\Infrastructure\Install-LMN.ps1" -DryRun
+> ```
+
+Após a instalação, utilize o atalho **"Little Mere News - Batch"** na sua Área de Trabalho para executar o pipeline de processamento de notícias.
 
 ### 1. Infraestrutura Raiz (.env)
 Usado pelo PowerShell e scripts Python para comunicar com o Supabase.
