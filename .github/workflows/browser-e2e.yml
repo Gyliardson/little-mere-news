@@ -71,6 +71,7 @@ jobs:
           cp /tmp/lmn-next.log test-results/next.log 2>/dev/null || true
           cp /tmp/fake-supabase.log test-results/fake-supabase.log 2>/dev/null || true
           cp /tmp/browser-tests.log test-results/browser-tests.log 2>/dev/null || true
+          cp public/logo.png test-results/source-logo.png 2>/dev/null || true
           npx playwright screenshot http://127.0.0.1:3000/en/ci-admin/login test-results/failure.png || true
       - name: Upload browser failure evidence
         if: failure()
