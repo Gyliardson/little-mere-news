@@ -59,9 +59,10 @@ export default function AdminLogin() {
         return;
       }
 
-      // Successful login - redirect to dashboard
-      router.push(`/${lang}/${secret_admin}`);
-      router.refresh();
+      // Use one navigation after the auth cookie is persisted. An immediate
+      // router.refresh() here can race the route transition and refresh the
+      // login page instead of allowing the protected dashboard request to win.
+      router.replace(`/${lang}/${secret_admin}`);
     } catch {
       setError(labels.errorGeneric);
       setLoading(false);
