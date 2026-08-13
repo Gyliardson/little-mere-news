@@ -51,7 +51,14 @@ Production migrations should always be reviewed against existing data before bei
 
 `Backend-Harvester/` consumes configured external feeds, normalizes source data and optionally calls the configured local AI provider boundary.
 
-A production/local worker needs its Python dependencies plus the runtime configuration used by that service. Critical CI does not require live feeds, Ollama or GPU resources; deterministic fixtures cover the important failure modes.
+Runtime configuration used by the worker includes:
+
+- `LMN_FEEDS_FILE` — feed configuration JSON path; legacy default `/home/lmnadmin/feeds.json`;
+- `LMN_OUTPUT_FILE` — validated handoff queue written for the Publisher; legacy default `/home/lmnadmin/news_to_publish.json`;
+- `OLLAMA_API_URL` — optional local/provider endpoint;
+- `OLLAMA_MODEL` — provider model name.
+
+A portable host should set explicit paths/endpoints appropriate to that environment instead of relying on the original `/home/lmnadmin` or private-network defaults. Critical CI does not require live feeds, Ollama or GPU resources; deterministic fixtures cover the important failure modes.
 
 External sources are mutable and untrusted. A deployed Harvester should be treated as a job/worker with observable failures, bounded network behavior and retry policy rather than as part of frontend process health.
 
@@ -59,7 +66,16 @@ External sources are mutable and untrusted. A deployed Harvester should be treat
 
 `Backend-Publisher/` consumes validated queue items and persists them to Supabase/PostgreSQL with retry/idempotency behavior.
 
-Its Supabase credential is privileged server/job configuration and must never enter browser bundles, public environment variables or logs.
+Runtime configuration:
+
+- `SUPABASE_URL` — Supabase project/API URL for the server-side job;
+- `SUPABASE_KEY` — privileged server/job credential; never expose it to browser code, public environment variables or logs;
+- `LMN_INPUT_FILE` — validated handoff queue consumed by the Publisher; legacy default `/home/lmnadmin/news_to_publish.json`;
+- `LMN_REJECTED_FILE` — quarantine file for invalid payloads; legacy default `/home/lmnadmin/news_to_publish.rejected.json`.
+
+For a normal same-host/file-handoff deployment, configure `LMN_OUTPUT_FILE` on the Harvester and `LMN_INPUT_FILE` on the Publisher to the **same path**. The two names are deliberately stage-specific: one service writes the handoff and the other consumes it. `LMN_REJECTED_FILE` must be a different path from `LMN_INPUT_FILE`; the Publisher rejects that unsafe configuration rather than risking queue/quarantine overwrite.
+
+The old `/home/lmnadmin/...` topology remains the default for backwards compatibility, but it is no longer required. Parent directories for retry/quarantine writes are created as needed and persistence remains atomic.
 
 The Publisher can run independently from the frontend host. Its ability to reach the database is a separate operational concern from `/api/health`.
 
@@ -90,6 +106,16 @@ From a fresh clone, the expected verification chain is:
 
 The GitHub Actions workflows implement these boundaries independently so failures remain attributable and CI never needs production credentials.
 
+For a portable file-handoff smoke test outside the legacy topology, choose a temporary queue path and use it consistently:
+
+```bash
+export LMN_OUTPUT_FILE=/tmp/lmn/news_to_publish.json
+export LMN_INPUT_FILE=/tmp/lmn/news_to_publish.json
+export LMN_REJECTED_FILE=/tmp/lmn/news_to_publish.rejected.json
+```
+
+This configuration changes only worker file locations; it does not bypass payload validation, retry behavior, Supabase authorization, or database constraints.
+
 ## Production smoke verification
 
 Deterministic CI cannot prove DNS, hosted Supabase networking, production secrets, real external feed availability or local Ollama availability. After deploying an environment, perform a bounded smoke check appropriate to that environment:
@@ -101,6 +127,7 @@ Deterministic CI cannot prove DNS, hosted Supabase networking, production secret
 - an intended administrator can authenticate and reach the CMS;
 - database RLS remains enabled and migrations match the repository;
 - Publisher can perform a controlled idempotent persistence check without exposing credentials;
+- Harvester→Publisher queue paths resolve to the intended shared handoff when file-based ingestion is enabled;
 - Harvester/provider connectivity is checked separately if live ingestion is enabled.
 
 Do not put production secrets or personal data into CI fixtures or screenshots to obtain this evidence.
@@ -117,4 +144,5 @@ Likewise, provisioning Hyper-V hosts, GPU drivers or local Ollama models is opti
 - upstream vulnerability databases may lag undisclosed issues;
 - a liveness endpoint cannot replace provider-specific monitoring;
 - production data can expose migration conflicts absent from an empty disposable database;
+- a file-based Harvester→Publisher handoff still requires both workers to share/reach the configured queue location;
 - optional local infrastructure depends on host/network configuration outside the repository.
