@@ -26,7 +26,8 @@ The repository contains:
 - `supabase/migrations/` — versioned database schema, constraints and RLS policies;
 - `supabase/tests/` — deterministic PostgreSQL security/contract tests;
 - `Infrastructure/` — optional Hyper-V/local orchestration scripts;
-- `.github/workflows/ci.yml` — clean CI gates that do not require the local infrastructure.
+- `.github/workflows/ci.yml` — frontend, Python, and PostgreSQL quality gates;
+- `.github/workflows/browser-e2e.yml` — deterministic Chromium E2E and accessibility regressions.
 
 ## Content pipeline
 
@@ -70,9 +71,13 @@ GitHub Actions runs independent gates for:
 - frontend lint, TypeScript typecheck, and production build;
 - deterministic Harvester tests;
 - deterministic Publisher tests;
-- PostgreSQL migration/RLS contract tests.
+- PostgreSQL migration/RLS contract tests;
+- Chromium browser E2E for locale handling, public failure states, unauthenticated routing, ordinary-user authorization denial, and administrator access;
+- browser accessibility regressions for labels, keyboard navigation, dialog semantics, focus restoration, and representative structural checks.
 
-The critical CI path intentionally does not require Ollama, a GPU, Hyper-V, production Supabase credentials, or live news sources.
+Browser tests run the production Next.js server against a repository-owned loopback Supabase HTTP fixture. The fixture uses synthetic users and news records only; no production credentials, production Supabase project, live feeds, Ollama, GPU, or Hyper-V environment are required. Failure runs preserve application/fixture logs and a diagnostic screenshot as short-lived GitHub Actions artifacts.
+
+See [`docs/testing.md`](docs/testing.md) for deterministic local execution and test-boundary details.
 
 ## Local setup
 
@@ -119,6 +124,7 @@ To grant administrative access in an environment, insert the intended authentica
 
 - External publishers and feeds can change markup, metadata, availability, or rate behavior without notice.
 - Local Ollama inference is optional for the production pipeline but deliberately excluded from deterministic CI.
+- The browser Supabase fixture is a deterministic contract double, not a replacement for a production-environment smoke test.
 - Production Supabase migrations must be reviewed against existing data before deployment; the uniqueness migration intentionally does not silently delete duplicate records.
 - Hyper-V orchestration is environment-specific and should not be treated as the only supported development path.
 
