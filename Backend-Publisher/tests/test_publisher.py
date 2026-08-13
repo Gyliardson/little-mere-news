@@ -80,6 +80,16 @@ def test_queue_paths_reject_same_input_and_rejected_file(tmp_path):
         )
 
 
+def test_queue_paths_reject_empty_override():
+    with pytest.raises(ValueError, match="LMN_REJECTED_FILE must not be empty"):
+        publisher.get_queue_paths({"LMN_REJECTED_FILE": "   "})
+
+
+def test_queue_paths_reject_existing_directory(tmp_path):
+    with pytest.raises(ValueError, match="LMN_INPUT_FILE must point to a file"):
+        publisher.get_queue_paths({"LMN_INPUT_FILE": str(tmp_path)})
+
+
 def test_validate_item_rejects_missing_fields_and_non_http_url():
     assert publisher.validate_item(valid_item(title_en="")) is None
     assert publisher.validate_item(valid_item(source_url="javascript:alert(1)")) is None
