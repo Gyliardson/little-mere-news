@@ -22,9 +22,15 @@ test("authenticated non-admin is returned to login with forbidden state", async 
   await page.getByLabel("Password").fill("viewer-password");
   await page.getByRole("button", { name: "Authenticate" }).click();
 
-  await page.waitForURL(`${baseURL}/en/ci-admin/login?error=forbidden`);
+  // The protected route redirects through Next.js navigation. Assert the
+  // visible denied boundary first instead of waiting for a full-page `load`,
+  // then verify that the URL carries the explicit forbidden state.
+  await page.getByRole("heading", { name: "Restricted Access" }).waitFor();
+  await page.waitForFunction(
+    (expected) => window.location.href === expected,
+    `${baseURL}/en/ci-admin/login?error=forbidden`,
+  );
   assert.equal(page.url(), `${baseURL}/en/ci-admin/login?error=forbidden`);
-  assert.equal(await page.getByRole("heading", { name: "Restricted Access" }).count(), 1);
 
   await context.close();
 });
