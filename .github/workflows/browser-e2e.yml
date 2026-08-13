@@ -52,7 +52,18 @@ jobs:
             fi
             sleep 1
           done
+          mkdir -p test-results
           npm run test:e2e 2>&1 | tee /tmp/browser-tests.log
+      - name: Upload temporary media evidence
+        if: success() && github.ref_name == 'work/21-media-performance'
+        uses: actions/upload-artifact@v4
+        with:
+          name: media-performance-evidence-${{ github.sha }}
+          path: |
+            frontend-web/test-results/media-desktop.png
+            frontend-web/test-results/media-mobile.png
+          if-no-files-found: error
+          retention-days: 7
       - name: Capture browser failure evidence
         if: failure()
         run: |
