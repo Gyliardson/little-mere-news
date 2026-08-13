@@ -52,6 +52,11 @@ jobs:
             fi
             sleep 1
           done
+          curl --fail --silent --show-error \
+            'http://127.0.0.1:3000/_next/image?url=%2Flogo.png&w=48&q=75' \
+            -o /tmp/optimized-logo
+          printf 'optimizer-bytes=' && wc -c < /tmp/optimized-logo
+          file /tmp/optimized-logo
           mkdir -p test-results
           npm run test:e2e 2>&1 | tee /tmp/browser-tests.log
       - name: Upload temporary media evidence
