@@ -53,3 +53,22 @@ test("CMS news dialog has accessible semantics and keyboard close", async () => 
 
   await context.close();
 });
+
+test("CMS edit dialog exposes labeled controls", async () => {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await context.newPage();
+  await signIn(page);
+  await page.goto(`${baseURL}/en/ci-admin/news`, { waitUntil: "domcontentloaded" });
+
+  await page.getByRole("button", { name: /Edit: Deterministic AI fixture/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit News" });
+  await dialog.waitFor();
+
+  assert.equal(await dialog.getByLabel("Category").count(), 1);
+  assert.equal(await dialog.getByLabel("Title (EN)").count(), 1);
+  assert.equal(await dialog.getByLabel("Title (PT)").count(), 1);
+  assert.equal(await dialog.getByLabel("Summary (EN)").count(), 1);
+  assert.equal(await dialog.getByLabel("Summary (PT)").count(), 1);
+
+  await context.close();
+});
