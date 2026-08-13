@@ -51,6 +51,19 @@ Current browser coverage proves:
 
 The browser workflow builds and starts the production Next.js server before running the suite. It uses no production credentials, live Supabase project, Ollama, GPU resources, live feeds, or Hyper-V topology. On failure, it uploads Next.js/fake-Supabase logs and a diagnostic browser screenshot for a short retention period.
 
+## Security gates
+
+Security checks are kept separate from the functional CI workflow so their evidence is explicit and independently reviewable.
+
+- `pip-audit` checks both production Python requirement sets and fails the security workflow when an actionable dependency vulnerability is reported.
+- Gitleaks scans the full committed Git history with findings redacted. The workflow pins the scanner version and verifies the downloaded release archive checksum before execution.
+- CodeQL analyzes JavaScript/TypeScript and Python using a commit-pinned GitHub action and least-privilege workflow permissions. SARIF upload uses only the `security-events: write` permission required by CodeQL.
+- Frontend npm audits cover both production dependencies and the complete dependency tree.
+
+During dependency remediation, an npm audit may temporarily remain diagnostic on the checked-in lockfile while a candidate lockfile is generated and validated. Such a diagnostic state is not a passing security claim: the related P1 remains open until the remediated package files are committed and the npm audit is converted to a blocking gate. Candidate validation must prove a clean audit plus `npm ci`, lint, typecheck, and production build before promotion.
+
+These checks are deterministic CI controls, not proof that every future vulnerability or secret will be detected. Repository-host security settings and upstream advisory data remain external dependencies and must be reviewed separately when relevant.
+
 ## Test boundaries
 
 The local Supabase fixture is deliberately a contract double rather than a substitute for PostgreSQL/RLS integration tests. Database authorization and uniqueness remain exercised independently by `supabase/tests/rls_contract.sql` against disposable PostgreSQL.
