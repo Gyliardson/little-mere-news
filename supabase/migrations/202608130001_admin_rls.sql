@@ -15,7 +15,7 @@ to authenticated
 using (user_id = auth.uid());
 
 revoke all on table public.admin_users from anon;
-revoke insert, update, delete on table public.admin_users from authenticated;
+revoke all on table public.admin_users from authenticated;
 grant select on table public.admin_users to authenticated;
 
 -- Publisher idempotency contract used by Backend-Publisher/main.py.
@@ -25,6 +25,13 @@ create unique index if not exists news_source_url_key
   on public.news (source_url);
 
 alter table public.news enable row level security;
+
+-- Make table privileges explicit instead of depending on dashboard-created grants.
+-- RLS remains the authorization boundary for authenticated mutations.
+revoke all on table public.news from anon;
+revoke all on table public.news from authenticated;
+grant select on table public.news to anon, authenticated;
+grant insert, update, delete on table public.news to authenticated;
 
 drop policy if exists "news_public_read" on public.news;
 create policy "news_public_read"
