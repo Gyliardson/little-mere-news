@@ -33,15 +33,21 @@ jobs:
           cache-dependency-path: frontend-web/package-lock.json
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npm run build
-      - name: Browser regressions
+      - name: Build and browser regressions
         shell: bash
         run: |
           set -o pipefail
           node e2e/fake-supabase.mjs > /tmp/fake-supabase.log 2>&1 &
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:54321/rest/v1/news >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          npm run build
           npm run start -- -H 127.0.0.1 -p 3000 > /tmp/lmn-next.log 2>&1 &
           for attempt in {1..30}; do
-            if curl --fail --silent http://127.0.0.1:54321/rest/v1/news >/dev/null && curl --fail --silent http://127.0.0.1:3000/en/ci-admin/login >/dev/null; then
+            if curl --fail --silent http://127.0.0.1:3000/en/ci-admin/login >/dev/null; then
               break
             fi
             sleep 1
