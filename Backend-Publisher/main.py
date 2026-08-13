@@ -26,11 +26,28 @@ MAX_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 1.0
 
 
+def _configured_file_path(environ, name, default):
+    """Resolve one optional file path and reject empty/directory configuration."""
+    raw_value = environ.get(name)
+    if raw_value is None:
+        path = Path(default)
+    else:
+        value = raw_value.strip()
+        if not value:
+            raise ValueError(f"{name} must not be empty")
+        path = Path(value).expanduser()
+
+    if path.exists() and path.is_dir():
+        raise ValueError(f"{name} must point to a file, not a directory")
+
+    return path
+
+
 def get_queue_paths(environ=None):
     """Resolve queue paths from environment while preserving legacy defaults."""
     environ = os.environ if environ is None else environ
-    input_file = Path(environ.get("LMN_INPUT_FILE", str(DEFAULT_INPUT_FILE))).expanduser()
-    rejected_file = Path(environ.get("LMN_REJECTED_FILE", str(DEFAULT_REJECTED_FILE))).expanduser()
+    input_file = _configured_file_path(environ, "LMN_INPUT_FILE", DEFAULT_INPUT_FILE)
+    rejected_file = _configured_file_path(environ, "LMN_REJECTED_FILE", DEFAULT_REJECTED_FILE)
 
     if input_file.resolve(strict=False) == rejected_file.resolve(strict=False):
         raise ValueError("LMN_INPUT_FILE and LMN_REJECTED_FILE must be different paths")
