@@ -45,3 +45,18 @@ jobs:
             sleep 1
           done
           npm run test:e2e
+      - name: Capture browser failure evidence
+        if: failure()
+        run: |
+          mkdir -p test-results
+          cp /tmp/lmn-next.log test-results/next.log 2>/dev/null || true
+          cp /tmp/fake-supabase.log test-results/fake-supabase.log 2>/dev/null || true
+          npx playwright screenshot http://127.0.0.1:3000/en/ci-admin/login test-results/failure.png || true
+      - name: Upload browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-e2e-failure-${{ github.sha }}
+          path: frontend-web/test-results
+          if-no-files-found: warn
+          retention-days: 7
