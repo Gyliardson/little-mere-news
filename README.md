@@ -84,7 +84,7 @@ Browser tests run the production Next.js server against a repository-owned loopb
 
 The checked-in frontend package manifests are the audited dependency state. Both production-only and full-tree npm audits are blocking CI checks at high severity or above; a generated candidate is never treated as a passing security claim until its manifests are committed.
 
-See [`docs/testing.md`](docs/testing.md) for deterministic local execution and test-boundary details.
+See [`docs/testing.md`](docs/testing.md) for deterministic test execution and [`docs/deployment.md`](docs/deployment.md) for the deploy/runtime and clean-room contract.
 
 ## Local setup
 
@@ -97,7 +97,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Configure the Supabase public URL/key and `ADMIN_PHANTOM_PATH` in `.env.local`. Do not place a service-role key in browser-exposed variables.
+Configure the Supabase public URL/key and `ADMIN_PHANTOM_PATH` in `.env.local`. Do not place a service-role key in browser-exposed variables. The frontend-specific environment, production build/start, healthcheck and E2E commands are documented in [`frontend-web/README.md`](frontend-web/README.md).
 
 ### Python services
 
@@ -112,6 +112,12 @@ To grant administrative access in an environment, insert the intended authentica
 ### Optional local infrastructure
 
 `Infrastructure/` contains the original Windows/Hyper-V orchestration for the local Harvester/Brain/Publisher topology. It remains a supported deployment option, not a prerequisite for building or testing the repository.
+
+## Deployment and clean-room verification
+
+Deployment is intentionally componentized: the Next.js frontend, Supabase/PostgreSQL, Harvester, Publisher, optional Ollama inference and optional Hyper-V orchestration have distinct runtime boundaries. A clean-room validation must start from a fresh checkout, apply the documented environment and database contract, build/start the production frontend, verify `/api/health` as **Next.js process liveness only**, and then run the deterministic test suites. Provider readiness and external-source availability require separate smoke checks.
+
+See [`docs/deployment.md`](docs/deployment.md) for the authoritative runbook and residual operational limitations.
 
 ## UI evidence
 
