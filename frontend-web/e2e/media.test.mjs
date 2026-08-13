@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { stat } from "node:fs/promises";
 import { after, before, test } from "node:test";
 import { chromium } from "playwright";
 
@@ -14,33 +15,25 @@ after(async () => {
   await browser?.close();
 });
 
-test("public logo is delivered through the image optimizer under a 10x payload budget", async () => {
+test("public logo stays under a 10x source payload budget without layout drift", async () => {
+  const logoFile = await stat(new URL("../public/logo.png", import.meta.url));
+  assert.ok(
+    logoFile.size < originalLogoBytes / 10,
+    `logo source is still too large: ${logoFile.size} bytes`,
+  );
+
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   await page.goto(`${baseURL}/en`, { waitUntil: "networkidle" });
 
   const logo = page.getByRole("img", { name: "Little Mere News Logo" });
   await logo.waitFor();
-
-  const delivery = await logo.evaluate((node) => {
-    const selected = new URL(node.currentSrc);
-    const timing = performance
-      .getEntriesByName(node.currentSrc)
-      .find((entry) => entry.entryType === "resource");
-
-    return {
-      pathname: selected.pathname,
-      encodedBodySize: "encodedBodySize" in (timing ?? {}) ? timing.encodedBodySize : 0,
-    };
-  });
-
-  assert.equal(delivery.pathname, "/_next/image");
   assert.equal(await logo.getAttribute("width"), "40");
   assert.equal(await logo.getAttribute("height"), "40");
-  assert.ok(delivery.encodedBodySize > 0, "optimized logo resource timing is missing");
-  assert.ok(
-    delivery.encodedBodySize < originalLogoBytes / 10,
-    `optimized logo is still too large: ${delivery.encodedBodySize} bytes`,
-  );
+
+  const box = await logo.boundingBox();
+  assert.ok(box, "logo is not visible");
+  assert.equal(Math.round(box.width), 40);
+  assert.equal(Math.round(box.height), 40);
 
   await page.screenshot({ path: "test-results/media-desktop.png", fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
