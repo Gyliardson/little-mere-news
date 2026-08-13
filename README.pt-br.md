@@ -84,7 +84,7 @@ Os testes de browser sobem o servidor Next.js de produção contra um fixture HT
 
 Os manifests versionados do frontend representam o estado de dependências auditado. Tanto o audit apenas de produção quanto o audit da árvore completa são gates bloqueantes da CI para severidade high ou superior; um candidato gerado nunca é tratado como evidência de segurança até seus manifests serem commitados.
 
-Consulte [`docs/testing.md`](docs/testing.md) para execução local determinística e detalhes das fronteiras de teste.
+Consulte [`docs/testing.md`](docs/testing.md) para execução determinística dos testes e [`docs/deployment.md`](docs/deployment.md) para o contrato de deploy/runtime e clean-room.
 
 ## Setup local
 
@@ -97,7 +97,7 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Configure a URL/chave pública do Supabase e `ADMIN_PHANTOM_PATH` em `.env.local`. Não coloque uma chave `service_role` em variáveis expostas ao browser.
+Configure a URL/chave pública do Supabase e `ADMIN_PHANTOM_PATH` em `.env.local`. Não coloque uma chave `service_role` em variáveis expostas ao browser. O contrato específico de ambiente, build/start de produção, healthcheck e E2E do frontend está em [`frontend-web/README.md`](frontend-web/README.md).
 
 ### Serviços Python
 
@@ -112,6 +112,12 @@ Para conceder acesso administrativo, insira o UUID do usuário autenticado desej
 ### Infraestrutura local opcional
 
 `Infrastructure/` contém a orquestração original Windows/Hyper-V para a topologia local Harvester/Brain/Publisher. Ela continua sendo uma opção de deploy, não um pré-requisito para build ou testes do repositório.
+
+## Deploy e verificação clean-room
+
+O deploy é deliberadamente dividido por componente: frontend Next.js, Supabase/PostgreSQL, Harvester, Publisher, inferência opcional via Ollama e orquestração opcional via Hyper-V possuem fronteiras de runtime distintas. Uma validação clean-room deve começar de um checkout novo, aplicar o contrato documentado de ambiente e banco, buildar/iniciar o frontend de produção, verificar `/api/health` apenas como **liveness do processo Next.js** e então executar as suítes determinísticas. Readiness dos providers e disponibilidade de fontes externas exigem smoke checks separados.
+
+Consulte [`docs/deployment.md`](docs/deployment.md) para o runbook autoritativo e as limitações operacionais residuais.
 
 ## Evidência visual
 
