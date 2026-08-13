@@ -11,8 +11,8 @@ from supabase import Client, create_client
 # Little Mere News - Publisher Script
 # ==========================================
 
-INPUT_FILE = Path("/home/lmnadmin/news_to_publish.json")
-REJECTED_FILE = Path("/home/lmnadmin/news_to_publish.rejected.json")
+DEFAULT_INPUT_FILE = Path("/home/lmnadmin/news_to_publish.json")
+DEFAULT_REJECTED_FILE = Path("/home/lmnadmin/news_to_publish.rejected.json")
 REQUIRED_FIELDS = (
     "category",
     "source_name",
@@ -24,6 +24,18 @@ REQUIRED_FIELDS = (
 )
 MAX_ATTEMPTS = 3
 RETRY_BACKOFF_SECONDS = 1.0
+
+
+def get_queue_paths(environ=None):
+    """Resolve queue paths from environment while preserving legacy defaults."""
+    environ = os.environ if environ is None else environ
+    input_file = Path(environ.get("LMN_INPUT_FILE", str(DEFAULT_INPUT_FILE))).expanduser()
+    rejected_file = Path(environ.get("LMN_REJECTED_FILE", str(DEFAULT_REJECTED_FILE))).expanduser()
+
+    if input_file.resolve(strict=False) == rejected_file.resolve(strict=False):
+        raise ValueError("LMN_INPUT_FILE and LMN_REJECTED_FILE must be different paths")
+
+    return input_file, rejected_file
 
 
 def validate_item(item):
@@ -137,13 +149,19 @@ def main():
         print("[FATAL] SUPABASE_URL and SUPABASE_KEY must be set in the environment.")
         return 1
 
-    if not INPUT_FILE.exists():
-        print(f"[INFO] File {INPUT_FILE} not found. Nothing to publish.")
+    try:
+        input_file, rejected_file = get_queue_paths()
+    except ValueError as exc:
+        print(f"[FATAL] Invalid publisher queue configuration: {exc}")
+        return 1
+
+    if not input_file.exists():
+        print(f"[INFO] File {input_file} not found. Nothing to publish.")
         return 0
 
     print("[2/3] Reading processed news payload...")
     try:
-        with INPUT_FILE.open("r", encoding="utf-8") as file_handle:
+        with input_file.open("r", encoding="utf-8") as file_handle:
             news_items = json.load(file_handle)
     except (OSError, json.JSONDecodeError) as exc:
         print(f"[FATAL] Could not read publisher queue: {type(exc).__name__}")
@@ -154,7 +172,7 @@ def main():
         return 1
 
     if not news_items:
-        INPUT_FILE.unlink(missing_ok=True)
+        input_file.unlink(missing_ok=True)
         print("[INFO] No news items to publish.")
         return 0
 
@@ -163,21 +181,21 @@ def main():
     counts, retry_queue, rejected = process_batch(client, news_items)
 
     if retry_queue:
-        atomic_write_json(INPUT_FILE, retry_queue)
+        atomic_write_json(input_file, retry_queue)
     else:
-        INPUT_FILE.unlink(missing_ok=True)
+        input_file.unlink(missing_ok=True)
 
     if rejected:
         existing_rejected = []
-        if REJECTED_FILE.exists():
+        if rejected_file.exists():
             try:
-                with REJECTED_FILE.open("r", encoding="utf-8") as file_handle:
+                with rejected_file.open("r", encoding="utf-8") as file_handle:
                     loaded = json.load(file_handle)
                     if isinstance(loaded, list):
                         existing_rejected = loaded
             except (OSError, json.JSONDecodeError):
                 pass
-        atomic_write_json(REJECTED_FILE, [*existing_rejected, *rejected])
+        atomic_write_json(rejected_file, [*existing_rejected, *rejected])
 
     print("=========================================")
     print(
