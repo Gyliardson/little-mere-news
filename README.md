@@ -121,9 +121,7 @@ See [`docs/deployment.md`](docs/deployment.md) for the authoritative runbook and
 
 ## UI evidence
 
-<p align="center">
-  <img src="docs/assets/readme/walkthrough.gif" width="800" alt="Little Mere News walkthrough">
-</p>
+The lightweight static evidence below replaces the former 20+ MB animated walkthrough while preserving representative public and administrative views.
 
 | Public portal | Administrative dashboard |
 | :---: | :---: |
