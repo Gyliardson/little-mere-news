@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "node --test e2e/*.test.mjs",
+    "test:e2e": "node --test --test-concurrency=1 e2e/*.test.mjs",
     "check": "npm run lint && npm run typecheck && npm run build"
   },
   "dependencies": {
