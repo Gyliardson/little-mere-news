@@ -16,22 +16,30 @@ after(async () => {
 
 test("public logo is delivered through the image optimizer under a 10x payload budget", async () => {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-  await page.goto(`${baseURL}/en`, { waitUntil: "domcontentloaded" });
+  await page.goto(`${baseURL}/en`, { waitUntil: "networkidle" });
 
   const logo = page.getByRole("img", { name: "Little Mere News Logo" });
   await logo.waitFor();
-  const src = await logo.getAttribute("src");
 
-  assert.ok(src?.startsWith("/_next/image?"), `unexpected logo source: ${src}`);
+  const delivery = await logo.evaluate((node) => {
+    const selected = new URL(node.currentSrc);
+    const timing = performance
+      .getEntriesByName(node.currentSrc)
+      .find((entry) => entry.entryType === "resource");
+
+    return {
+      pathname: selected.pathname,
+      encodedBodySize: "encodedBodySize" in (timing ?? {}) ? timing.encodedBodySize : 0,
+    };
+  });
+
+  assert.equal(delivery.pathname, "/_next/image");
   assert.equal(await logo.getAttribute("width"), "40");
   assert.equal(await logo.getAttribute("height"), "40");
-
-  const optimizedResponse = await page.request.get(new URL(src, baseURL).toString());
-  assert.equal(optimizedResponse.ok(), true);
-  const optimizedBytes = (await optimizedResponse.body()).length;
+  assert.ok(delivery.encodedBodySize > 0, "optimized logo resource timing is missing");
   assert.ok(
-    optimizedBytes < originalLogoBytes / 10,
-    `optimized logo is still too large: ${optimizedBytes} bytes`,
+    delivery.encodedBodySize < originalLogoBytes / 10,
+    `optimized logo is still too large: ${delivery.encodedBodySize} bytes`,
   );
 
   await page.screenshot({ path: "test-results/media-desktop.png", fullPage: true });
