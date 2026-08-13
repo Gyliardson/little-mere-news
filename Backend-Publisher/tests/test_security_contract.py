@@ -4,7 +4,9 @@ ROOT = Path(__file__).resolve().parents[2]
 MIGRATION = ROOT / "supabase" / "migrations" / "202608130001_admin_rls.sql"
 ADMIN_HELPER = ROOT / "frontend-web" / "src" / "lib" / "auth" / "admin.ts"
 ACTIONS = ROOT / "frontend-web" / "src" / "app" / "[lang]" / "[secret_admin]" / "(dashboard)" / "news" / "actions.ts"
-LAYOUT = ROOT / "frontend-web" / "src" / "app" / "[lang]" / "[secret_admin]" / "(dashboard)" / "layout.tsx"
+DASHBOARD_LAYOUT = ROOT / "frontend-web" / "src" / "app" / "[lang]" / "[secret_admin]" / "(dashboard)" / "layout.tsx"
+ADMIN_PATH_LAYOUT = ROOT / "frontend-web" / "src" / "app" / "[lang]" / "[secret_admin]" / "layout.tsx"
+SETTINGS = ROOT / "frontend-web" / "src" / "app" / "[lang]" / "[secret_admin]" / "(dashboard)" / "settings" / "page.tsx"
 
 
 def test_migration_enforces_public_read_and_admin_only_writes():
@@ -34,7 +36,7 @@ def test_admin_membership_cannot_be_self_managed_by_authenticated_users():
 def test_dashboard_and_mutations_share_the_same_admin_boundary():
     helper = ADMIN_HELPER.read_text(encoding="utf-8")
     actions = ACTIONS.read_text(encoding="utf-8")
-    layout = LAYOUT.read_text(encoding="utf-8")
+    layout = DASHBOARD_LAYOUT.read_text(encoding="utf-8")
 
     assert '.from("admin_users")' in helper
     assert "membership?.user_id === user.id" in helper
@@ -43,3 +45,26 @@ def test_dashboard_and_mutations_share_the_same_admin_boundary():
     assert 'accessError: "Unauthorized"' in actions
     assert 'accessError: "Forbidden"' in actions
     assert "if (!isAdmin)" in layout
+
+
+def test_admin_path_obscurity_is_separate_from_authorization():
+    path_layout = ADMIN_PATH_LAYOUT.read_text(encoding="utf-8")
+    dashboard_layout = DASHBOARD_LAYOUT.read_text(encoding="utf-8")
+
+    assert "process.env.ADMIN_PHANTOM_PATH" in path_layout
+    assert "notFound()" in path_layout
+    assert "getAdminContext" not in path_layout
+    assert "getAdminContext" in dashboard_layout
+    assert "if (!isAdmin)" in dashboard_layout
+
+
+def test_settings_describe_obscurity_and_observed_state_truthfully():
+    settings = SETTINGS.read_text(encoding="utf-8")
+
+    assert 'import { getAdminContext } from "@/lib/auth/admin"' in settings
+    assert "email_confirmed_at" in settings
+    assert "countError" in settings
+    assert "Optional noise reduction" in settings
+    assert "not authentication or authorization" in settings
+    assert "Phantom Route Protection" not in settings
+    assert "Super Administrator" not in settings
