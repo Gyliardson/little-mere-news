@@ -1,0 +1,44 @@
+name: Browser E2E
+
+on:
+  push:
+    branches:
+      - 'work/**'
+      - portfolio/revamp-2026
+  pull_request:
+    branches:
+      - portfolio/revamp-2026
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend-web
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+      SUPABASE_SERVICE_ROLE_KEY: ci-placeholder-service-role-key
+      ADMIN_PHANTOM_PATH: ci-admin
+      E2E_BASE_URL: http://127.0.0.1:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend-web/package-lock.json
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run build
+      - name: Browser regressions
+        run: |
+          npm run start -- -H 127.0.0.1 -p 3000 &
+          for attempt in {1..30}; do
+            curl --fail --silent http://127.0.0.1:3000/en/ci-admin/login >/dev/null && break
+            sleep 1
+          done
+          npm run test:e2e
