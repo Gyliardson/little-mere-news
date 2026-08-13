@@ -54,7 +54,7 @@ test("CMS news dialog has accessible semantics and keyboard close", async () => 
   await context.close();
 });
 
-test("CMS edit dialog exposes labeled controls", async () => {
+test("CMS edit dialog exposes labels and preserves field focus", async () => {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const page = await context.newPage();
   await signIn(page);
@@ -65,10 +65,16 @@ test("CMS edit dialog exposes labeled controls", async () => {
   await dialog.waitFor();
 
   assert.equal(await dialog.getByLabel("Category").count(), 1);
-  assert.equal(await dialog.getByLabel("Title (EN)").count(), 1);
+  const title = dialog.getByLabel("Title (EN)");
+  assert.equal(await title.count(), 1);
   assert.equal(await dialog.getByLabel("Title (PT)").count(), 1);
   assert.equal(await dialog.getByLabel("Summary (EN)").count(), 1);
   assert.equal(await dialog.getByLabel("Summary (PT)").count(), 1);
+
+  await title.focus();
+  await page.keyboard.type("X");
+  assert.equal(await title.evaluate((node) => document.activeElement === node), true);
+  assert.match(await title.inputValue(), /^X|X$/);
 
   await context.close();
 });
