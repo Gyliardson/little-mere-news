@@ -28,11 +28,12 @@ async function structuralViolations(page) {
   }));
 }
 
-test("public error state keeps basic accessible structure", async () => {
+test("public feed keeps basic accessible structure", async () => {
   const page = await browser.newPage();
   const response = await page.goto(`${baseURL}/en`, { waitUntil: "domcontentloaded" });
   assert.equal(response?.status(), 200);
-  await page.getByRole("alert").waitFor();
+  await page.getByRole("heading", { name: "Latest News" }).waitFor();
+  await page.getByRole("link", { name: "Read more about Deterministic AI fixture" }).waitFor();
   assert.deepEqual(await structuralViolations(page), {
     imagesWithoutAlt: 0,
     unnamedButtons: 0,
