@@ -18,7 +18,13 @@ async function signIn(page) {
   await page.getByLabel("Corporate Email").fill("admin@example.test");
   await page.getByLabel("Password").fill("admin-password");
   await page.getByRole("button", { name: "Authenticate" }).click();
-  await page.waitForURL(`${baseURL}/en/ci-admin`);
+
+  // Next.js performs a client-side router.replace after the auth cookie is
+  // persisted. Synchronize on the authorized UI boundary rather than a full
+  // document `load` event, which is not a stable lifecycle signal for a
+  // client-side transition.
+  await page.getByRole("heading", { name: "Overview" }).waitFor();
+  assert.equal(page.url(), `${baseURL}/en/ci-admin`);
 }
 
 test("authorized administrator reaches the real dashboard boundary", async () => {
@@ -26,7 +32,6 @@ test("authorized administrator reaches the real dashboard boundary", async () =>
   const page = await context.newPage();
   await signIn(page);
 
-  await page.getByRole("heading", { name: "Overview" }).waitFor();
   assert.equal(await page.getByText("Total Processed (Week)").count(), 1);
   assert.equal(await page.getByText("Articles Today").count(), 1);
   assert.equal(await page.getByText("Active Sources").count(), 1);
