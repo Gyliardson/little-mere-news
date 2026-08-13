@@ -19,3 +19,12 @@ test("unsupported locale returns not found", async () => {
   assert.equal(response?.status(), 404);
   await page.close();
 });
+
+test("dashboard without a session returns to login", async () => {
+  const page = await browser.newPage();
+  await page.goto(`${baseURL}/en/ci-admin`, { waitUntil: "domcontentloaded" });
+  await page.waitForURL(`${baseURL}/en/ci-admin/login`);
+  await page.getByRole("heading", { name: "Restricted Access" }).waitFor();
+  assert.equal(page.url(), `${baseURL}/en/ci-admin/login`);
+  await page.close();
+});
