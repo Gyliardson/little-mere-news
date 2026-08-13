@@ -121,9 +121,7 @@ Consulte [`docs/deployment.md`](docs/deployment.md) para o runbook autoritativo 
 
 ## Evidência visual
 
-<p align="center">
-  <img src="docs/assets/readme/walkthrough.gif" width="800" alt="Demonstração do Little Mere News">
-</p>
+A evidência estática leve abaixo substitui a antiga demonstração animada de mais de 20 MB, preservando visões representativas das superfícies pública e administrativa.
 
 | Portal público | Dashboard administrativo |
 | :---: | :---: |
