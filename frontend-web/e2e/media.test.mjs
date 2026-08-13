@@ -15,7 +15,7 @@ after(async () => {
 });
 
 test("public logo is delivered through the image optimizer under a 10x payload budget", async () => {
-  const page = await browser.newPage();
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
   await page.goto(`${baseURL}/en`, { waitUntil: "domcontentloaded" });
 
   const logo = page.getByRole("img", { name: "Little Mere News Logo" });
@@ -34,5 +34,8 @@ test("public logo is delivered through the image optimizer under a 10x payload b
     `optimized logo is still too large: ${optimizedBytes} bytes`,
   );
 
+  await page.screenshot({ path: "test-results/media-desktop.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: "test-results/media-mobile.png", fullPage: true });
   await page.close();
 });
