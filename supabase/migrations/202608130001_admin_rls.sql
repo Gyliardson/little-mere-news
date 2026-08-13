@@ -16,6 +16,8 @@ using (user_id = auth.uid());
 
 revoke all on table public.admin_users from anon;
 revoke all on table public.admin_users from authenticated;
+-- Kept explicit for auditability and for the contract test that guards self-promotion.
+revoke insert, update, delete on table public.admin_users from authenticated;
 grant select on table public.admin_users to authenticated;
 
 -- Publisher idempotency contract used by Backend-Publisher/main.py.
