@@ -26,7 +26,8 @@ O repositório contém:
 - `supabase/migrations/` — schema, constraints e policies RLS versionados;
 - `supabase/tests/` — testes determinísticos do contrato de segurança em PostgreSQL;
 - `Infrastructure/` — scripts opcionais de orquestração Hyper-V/local;
-- `.github/workflows/ci.yml` — gates de CI que não dependem da infraestrutura local.
+- `.github/workflows/ci.yml` — gates de frontend, Python e PostgreSQL;
+- `.github/workflows/browser-e2e.yml` — regressões determinísticas de E2E e acessibilidade em Chromium.
 
 ## Pipeline de conteúdo
 
@@ -70,9 +71,13 @@ O GitHub Actions executa gates independentes para:
 - lint do frontend, typecheck TypeScript e build de produção;
 - testes determinísticos do Harvester;
 - testes determinísticos do Publisher;
-- migrations PostgreSQL e contrato RLS.
+- migrations PostgreSQL e contrato RLS;
+- E2E em Chromium para locale inválido, estado público de falha, rota administrativa sem sessão, negação de usuário autenticado comum e acesso de administrador;
+- regressões de acessibilidade em browser para labels, navegação por teclado, semântica de diálogo, restauração de foco e verificações estruturais representativas.
 
-O caminho crítico de CI deliberadamente não exige Ollama, GPU, Hyper-V, credenciais de produção do Supabase ou fontes reais de notícias.
+Os testes de browser sobem o servidor Next.js de produção contra um fixture HTTP local de Supabase pertencente ao repositório. O fixture usa apenas usuários e notícias sintéticos; não requer credenciais de produção, projeto Supabase real, feeds externos, Ollama, GPU ou Hyper-V. Em falhas, logs da aplicação/fixture e uma captura diagnóstica são preservados temporariamente como artifacts do GitHub Actions.
+
+Consulte [`docs/testing.md`](docs/testing.md) para execução local determinística e detalhes das fronteiras de teste.
 
 ## Setup local
 
@@ -119,6 +124,7 @@ Para conceder acesso administrativo, insira o UUID do usuário autenticado desej
 
 - Fontes externas podem mudar markup, metadata, disponibilidade ou comportamento de rate limit sem aviso.
 - A inferência local via Ollama é opcional no pipeline de produção e deliberadamente excluída da CI determinística.
+- O fixture Supabase de browser é um contract double determinístico, não um substituto para smoke test em ambiente de produção.
 - Migrations de produção do Supabase devem ser revisadas contra os dados existentes antes do deploy; a migration de unicidade não remove duplicatas silenciosamente.
 - A orquestração Hyper-V é específica de ambiente e não deve ser tratada como o único caminho suportado de desenvolvimento.
 
