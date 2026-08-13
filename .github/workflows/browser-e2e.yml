@@ -60,22 +60,6 @@ jobs:
             sleep 1
           done
           npm run test:e2e 2>&1 | tee /tmp/browser-tests.log
-      - name: Capture temporary media evidence
-        if: success() && github.ref_name == 'work/21-media-performance'
-        run: |
-          mkdir -p test-results
-          npx playwright screenshot --viewport-size="1440,900" http://127.0.0.1:3000/en test-results/media-desktop.png
-          npx playwright screenshot --viewport-size="390,844" http://127.0.0.1:3000/en test-results/media-mobile.png
-      - name: Upload temporary media evidence
-        if: success() && github.ref_name == 'work/21-media-performance'
-        uses: actions/upload-artifact@v4
-        with:
-          name: media-performance-evidence-${{ github.sha }}
-          path: |
-            frontend-web/test-results/media-desktop.png
-            frontend-web/test-results/media-mobile.png
-          if-no-files-found: error
-          retention-days: 7
       - name: Capture browser failure evidence
         if: failure()
         run: |
