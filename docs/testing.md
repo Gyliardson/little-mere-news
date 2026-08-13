@@ -51,6 +51,17 @@ Current browser coverage proves:
 
 The browser workflow builds and starts the production Next.js server before running the suite. It uses no production credentials, live Supabase project, Ollama, GPU resources, live feeds, or Hyper-V topology. On failure, it uploads Next.js/fake-Supabase logs and a diagnostic browser screenshot for a short retention period.
 
+## Security gates
+
+Security checks are explicit and independently reviewable across the main CI, Security, and CodeQL workflows.
+
+- the main CI performs blocking `npm audit` checks for both production dependencies and the complete frontend dependency tree before lint, typecheck, and production build;
+- `pip-audit` checks both production Python requirement sets and fails the Security workflow when an actionable dependency vulnerability is reported;
+- Gitleaks scans the full committed Git history with findings redacted. The workflow pins the scanner version and verifies the downloaded release archive checksum before execution;
+- CodeQL analyzes JavaScript/TypeScript and Python using a commit-pinned GitHub action and least-privilege workflow permissions. SARIF upload uses only the `security-events: write` permission required by CodeQL.
+
+The checked-in frontend package manifests are the audited dependency state; remediation candidates are not treated as a security claim until committed. Dependency scans still rely on upstream advisory data, so a clean run is evidence for the current advisory set rather than proof that no undisclosed vulnerability exists.
+
 ## Test boundaries
 
 The local Supabase fixture is deliberately a contract double rather than a substitute for PostgreSQL/RLS integration tests. Database authorization and uniqueness remain exercised independently by `supabase/tests/rls_contract.sql` against disposable PostgreSQL.
