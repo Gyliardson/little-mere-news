@@ -6,12 +6,23 @@ The repository separates deterministic quality gates from optional live-environm
 
 Browser regressions live in `frontend-web/e2e/` and use Playwright's Chromium runtime through Node's built-in test runner.
 
-From `frontend-web/`:
+From `frontend-web/`, install and build first:
 
 ```bash
 npm ci
 npx playwright install chromium
 npm run build
+```
+
+Start the repository-owned Supabase HTTP fixture:
+
+```bash
+E2E_BASE_URL=http://127.0.0.1:3000 node e2e/fake-supabase.mjs
+```
+
+In another shell, start the production Next.js server against that fixture:
+
+```bash
 NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321 \
 NEXT_PUBLIC_SUPABASE_ANON_KEY=local-placeholder \
 SUPABASE_SERVICE_ROLE_KEY=local-placeholder \
@@ -19,27 +30,32 @@ ADMIN_PHANTOM_PATH=ci-admin \
 npm run start -- -H 127.0.0.1 -p 3000
 ```
 
-In another shell:
+Then run the browser suite:
 
 ```bash
-cd frontend-web
 E2E_BASE_URL=http://127.0.0.1:3000 npm run test:e2e
 ```
 
-The deterministic suite intentionally points Supabase at an unavailable loopback endpoint for public error-state coverage. It does not use production credentials, a live Supabase project, Ollama, GPU resources, live feeds, or the Hyper-V topology.
+The fixture contains synthetic administrator, ordinary authenticated-user, and news records. It implements only the Supabase Auth/PostgREST contract surface required by the browser tests. It is not a production Supabase emulator and must never be used as a security bypass or deployment dependency.
 
 Current browser coverage proves:
 
 - unsupported locale segments fail closed with not-found behavior;
 - the public feed renders a user-safe provider failure state instead of leaking backend details;
 - the administrative login form exposes programmatic labels and keyboard-reachable controls;
+- a request without a session is returned to the login boundary;
+- an authenticated ordinary user is denied administrative access;
+- a synthetic administrator passes the real browser sign-in, SSR session, server authorization, and `admin_users` membership path before reaching the dashboard;
+- CMS news dialogs expose dialog semantics, keyboard dismissal/focus restoration, accessible icon-button names, and programmatically associated edit labels;
 - representative public/login pages satisfy structural accessibility checks for image alternatives, control names, and form labels.
 
-The browser workflow builds and starts the production Next.js server before running the suite. Screenshot/media generation is intentionally separate from behavioral tests.
+The browser workflow builds and starts the production Next.js server before running the suite. It uses no production credentials, live Supabase project, Ollama, GPU resources, live feeds, or Hyper-V topology. On failure, it uploads Next.js/fake-Supabase logs and a diagnostic browser screenshot for a short retention period.
 
-## Current limitation
+## Test boundaries
 
-The browser suite does not yet emulate a complete authenticated Supabase administrator session. Authorized CMS behavior remains covered by server-side authorization/RLS contract tests but still needs a deterministic browser-level authenticated fixture before the E2E program gate can be considered complete.
+The local Supabase fixture is deliberately a contract double rather than a substitute for PostgreSQL/RLS integration tests. Database authorization and uniqueness remain exercised independently by `supabase/tests/rls_contract.sql` against disposable PostgreSQL.
+
+Likewise, deterministic browser success does not prove production networking, DNS, third-party availability, or a particular hosted Supabase deployment. Those remain deployment/smoke concerns and should not introduce real secrets into pull-request CI.
 
 ## Other deterministic gates
 
