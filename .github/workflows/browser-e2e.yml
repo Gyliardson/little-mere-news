@@ -35,7 +35,9 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run build
       - name: Browser regressions
+        shell: bash
         run: |
+          set -o pipefail
           node e2e/fake-supabase.mjs > /tmp/fake-supabase.log 2>&1 &
           npm run start -- -H 127.0.0.1 -p 3000 > /tmp/lmn-next.log 2>&1 &
           for attempt in {1..30}; do
@@ -44,13 +46,14 @@ jobs:
             fi
             sleep 1
           done
-          npm run test:e2e
+          npm run test:e2e 2>&1 | tee /tmp/browser-tests.log
       - name: Capture browser failure evidence
         if: failure()
         run: |
           mkdir -p test-results
           cp /tmp/lmn-next.log test-results/next.log 2>/dev/null || true
           cp /tmp/fake-supabase.log test-results/fake-supabase.log 2>/dev/null || true
+          cp /tmp/browser-tests.log test-results/browser-tests.log 2>/dev/null || true
           npx playwright screenshot http://127.0.0.1:3000/en/ci-admin/login test-results/failure.png || true
       - name: Upload browser failure evidence
         if: failure()
