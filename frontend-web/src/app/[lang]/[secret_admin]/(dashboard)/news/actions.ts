@@ -1,7 +1,14 @@
 "use server";
 
-import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { getAdminContext } from "@/lib/auth/admin";
 import { revalidatePath } from "next/cache";
+
+async function getMutationContext() {
+  const context = await getAdminContext();
+  if (!context.user) return { ...context, accessError: "Unauthorized" } as const;
+  if (!context.isAdmin) return { ...context, accessError: "Forbidden" } as const;
+  return { ...context, accessError: null } as const;
+}
 
 export async function updateNews(
   id: string,
@@ -13,44 +20,22 @@ export async function updateNews(
     category?: string;
   }
 ) {
-  const supabase = await createServerSupabaseClient();
+  const { supabase, accessError } = await getMutationContext();
+  if (accessError) return { error: accessError };
 
-  // Verify auth
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return { error: "Unauthorized" };
-  }
-
-  const { error } = await supabase
-    .from("news")
-    .update(data)
-    .eq("id", id);
-
-  if (error) {
-    return { error: error.message };
-  }
+  const { error } = await supabase.from("news").update(data).eq("id", id);
+  if (error) return { error: error.message };
 
   revalidatePath("/", "layout");
   return { success: true };
 }
 
 export async function deleteNews(id: string) {
-  const supabase = await createServerSupabaseClient();
+  const { supabase, accessError } = await getMutationContext();
+  if (accessError) return { error: accessError };
 
-  // Verify auth
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return { error: "Unauthorized" };
-  }
-
-  const { error } = await supabase
-    .from("news")
-    .delete()
-    .eq("id", id);
-
-  if (error) {
-    return { error: error.message };
-  }
+  const { error } = await supabase.from("news").delete().eq("id", id);
+  if (error) return { error: error.message };
 
   revalidatePath("/", "layout");
   return { success: true };
