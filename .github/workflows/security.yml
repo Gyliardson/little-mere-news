@@ -62,9 +62,20 @@ jobs:
         working-directory: frontend-web
         run: |
           npm install next@16.3.0 --save-exact --package-lock-only
+          npm install eslint-config-next@16.3.0 --save-dev --save-exact --package-lock-only
           npm audit fix --package-lock-only
+      - name: Audit candidate dependencies
+        working-directory: frontend-web
+        run: |
           npm audit --omit=dev --audit-level=high
           npm audit --audit-level=high
+      - name: Validate candidate install and frontend gates
+        working-directory: frontend-web
+        run: |
+          npm ci
+          npm run lint
+          npm run typecheck
+          npm run build
       - name: Upload candidate package files
         uses: actions/upload-artifact@v4
         with:
