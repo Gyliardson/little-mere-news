@@ -4,14 +4,7 @@ import { chromium } from "playwright";
 
 const baseURL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3000";
 let browser;
-
-before(async () => {
-  browser = await chromium.launch({ headless: true });
-});
-
-after(async () => {
-  await browser?.close();
-});
+let adminStorageState;
 
 async function signIn(page) {
   await page.goto(`${baseURL}/en/ci-admin/login`, { waitUntil: "domcontentloaded" });
@@ -27,10 +20,37 @@ async function signIn(page) {
   assert.equal(page.url(), `${baseURL}/en/ci-admin`);
 }
 
-test("authorized administrator reaches the real dashboard boundary", async () => {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-  const page = await context.newPage();
+before(async () => {
+  browser = await chromium.launch({ headless: true });
+
+  // Prove the real browser sign-in once, then reuse only the resulting browser
+  // storage for independent CMS scenarios. Repeating the same auth transition
+  // for every test adds lifecycle flake without increasing authorization
+  // coverage.
+  const bootstrap = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await bootstrap.newPage();
   await signIn(page);
+  adminStorageState = await bootstrap.storageState();
+  await bootstrap.close();
+});
+
+after(async () => {
+  await browser?.close();
+});
+
+async function newAdminContext() {
+  assert.ok(adminStorageState, "admin browser storage must be established by the real sign-in boundary");
+  return browser.newContext({
+    viewport: { width: 1280, height: 800 },
+    storageState: adminStorageState,
+  });
+}
+
+test("authorized administrator reaches the real dashboard boundary", async () => {
+  const context = await newAdminContext();
+  const page = await context.newPage();
+  await page.goto(`${baseURL}/en/ci-admin`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("heading", { name: "Overview" }).waitFor();
 
   assert.equal(await page.getByText("Total Processed (Week)").count(), 1);
   assert.equal(await page.getByText("Articles Today").count(), 1);
@@ -40,9 +60,8 @@ test("authorized administrator reaches the real dashboard boundary", async () =>
 });
 
 test("CMS news dialog has accessible semantics and keyboard close", async () => {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const context = await newAdminContext();
   const page = await context.newPage();
-  await signIn(page);
   await page.goto(`${baseURL}/en/ci-admin/news`, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: "News Manager" }).waitFor();
 
@@ -60,9 +79,8 @@ test("CMS news dialog has accessible semantics and keyboard close", async () => 
 });
 
 test("CMS edit dialog exposes labels and preserves field focus", async () => {
-  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const context = await newAdminContext();
   const page = await context.newPage();
-  await signIn(page);
   await page.goto(`${baseURL}/en/ci-admin/news`, { waitUntil: "domcontentloaded" });
 
   await page.getByRole("button", { name: /Edit: Deterministic AI fixture/ }).click();
