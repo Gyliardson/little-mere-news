@@ -20,41 +20,59 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: frontend-web/package-lock.json
-
       - name: Install frontend dependencies
         working-directory: frontend-web
         run: npm ci
-
       - name: Audit frontend production dependencies
         working-directory: frontend-web
         continue-on-error: true
         run: npm audit --omit=dev --audit-level=high
-
       - name: Audit complete frontend dependency tree
         working-directory: frontend-web
         continue-on-error: true
         run: npm audit --audit-level=high
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Install pip-audit
         run: python -m pip install --upgrade pip pip-audit==2.9.0
-
       - name: Audit Harvester dependencies
         run: pip-audit -r Backend-Harvester/requirements.txt
-
       - name: Audit Publisher dependencies
         run: pip-audit -r Backend-Publisher/requirements.txt
+
+  frontend-remediation-candidate:
+    name: Build dependency remediation candidate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Generate candidate package files
+        working-directory: frontend-web
+        run: |
+          npm install next@16.3.0 --save-exact --package-lock-only
+          npm audit fix --package-lock-only
+          npm audit --omit=dev --audit-level=high
+          npm audit --audit-level=high
+      - name: Upload candidate package files
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-security-remediation-${{ github.sha }}
+          path: |
+            frontend-web/package.json
+            frontend-web/package-lock.json
+          retention-days: 2
 
   secret-scan:
     name: Committed secret scan
@@ -64,7 +82,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
       - name: Install pinned Gitleaks
         shell: bash
         run: |
@@ -77,6 +94,5 @@ jobs:
           echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/'"${archive}" | sha256sum --check --strict
           tar -xzf "/tmp/${archive}" -C /tmp gitleaks
           /tmp/gitleaks version
-
       - name: Scan repository history
         run: /tmp/gitleaks git . --redact --no-banner
