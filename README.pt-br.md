@@ -27,7 +27,9 @@ O repositório contém:
 - `supabase/tests/` — testes determinísticos do contrato de segurança em PostgreSQL;
 - `Infrastructure/` — scripts opcionais de orquestração Hyper-V/local;
 - `.github/workflows/ci.yml` — gates de frontend, Python e PostgreSQL;
-- `.github/workflows/browser-e2e.yml` — regressões determinísticas de E2E e acessibilidade em Chromium.
+- `.github/workflows/browser-e2e.yml` — regressões determinísticas de E2E e acessibilidade em Chromium;
+- `.github/workflows/security.yml` — verificação de dependências e secrets commitados;
+- `.github/workflows/codeql.yml` — análise estática de JavaScript/TypeScript e Python.
 
 ## Pipeline de conteúdo
 
@@ -73,9 +75,14 @@ O GitHub Actions executa gates independentes para:
 - testes determinísticos do Publisher;
 - migrations PostgreSQL e contrato RLS;
 - E2E em Chromium para locale inválido, estado público de falha, rota administrativa sem sessão, negação de usuário autenticado comum e acesso de administrador;
-- regressões de acessibilidade em browser para labels, navegação por teclado, semântica de diálogo, restauração de foco e verificações estruturais representativas.
+- regressões de acessibilidade em browser para labels, navegação por teclado, semântica de diálogo, restauração de foco e verificações estruturais representativas;
+- auditoria de dependências Python e diagnóstico/validação de remediação das dependências npm do frontend;
+- varredura do histórico Git completo para secrets commitados usando um binário Gitleaks fixado e verificado por checksum;
+- CodeQL fixado por commit para JavaScript/TypeScript e Python.
 
 Os testes de browser sobem o servidor Next.js de produção contra um fixture HTTP local de Supabase pertencente ao repositório. O fixture usa apenas usuários e notícias sintéticos; não requer credenciais de produção, projeto Supabase real, feeds externos, Ollama, GPU ou Hyper-V. Em falhas, logs da aplicação/fixture e uma captura diagnóstica são preservados temporariamente como artifacts do GitHub Actions.
+
+O `npm audit` do frontend versionado só representa um gate de segurança bloqueante depois que o lockfile remediado estiver commitado e a própria etapa de audit estiver configurada para falhar a CI. Durante uma workstream de remediação ele pode permanecer diagnóstico enquanto um candidato gerado é obrigado, de forma independente, a passar audits limpos, instalação determinística, lint, typecheck e build de produção. O P1 correspondente permanece aberto até essa transição ser concluída.
 
 Consulte [`docs/testing.md`](docs/testing.md) para execução local determinística e detalhes das fronteiras de teste.
 
@@ -125,6 +132,7 @@ Para conceder acesso administrativo, insira o UUID do usuário autenticado desej
 - Fontes externas podem mudar markup, metadata, disponibilidade ou comportamento de rate limit sem aviso.
 - A inferência local via Ollama é opcional no pipeline de produção e deliberadamente excluída da CI determinística.
 - O fixture Supabase de browser é um contract double determinístico, não um substituto para smoke test em ambiente de produção.
+- Scanners de dependências dependem de dados de advisory externos e não provam ausência absoluta de vulnerabilidades; o estado atual de remediação deve ser lido junto da issue/PR de segurança ativa.
 - Migrations de produção do Supabase devem ser revisadas contra os dados existentes antes do deploy; a migration de unicidade não remove duplicatas silenciosamente.
 - A orquestração Hyper-V é específica de ambiente e não deve ser tratada como o único caminho suportado de desenvolvimento.
 
