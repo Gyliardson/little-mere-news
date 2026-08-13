@@ -26,9 +26,9 @@ The repository contains:
 - `supabase/migrations/` — versioned database schema, constraints and RLS policies;
 - `supabase/tests/` — deterministic PostgreSQL security/contract tests;
 - `Infrastructure/` — optional Hyper-V/local orchestration scripts;
-- `.github/workflows/ci.yml` — frontend, Python, and PostgreSQL quality gates;
+- `.github/workflows/ci.yml` — frontend, Python, PostgreSQL and blocking frontend dependency quality gates;
 - `.github/workflows/browser-e2e.yml` — deterministic Chromium E2E and accessibility regressions;
-- `.github/workflows/security.yml` — dependency and committed-secret verification;
+- `.github/workflows/security.yml` — Python dependency and committed-secret verification;
 - `.github/workflows/codeql.yml` — static analysis for JavaScript/TypeScript and Python.
 
 ## Content pipeline
@@ -70,19 +70,19 @@ The deterministic SQL contract in `supabase/tests/rls_contract.sql` exercises an
 
 GitHub Actions runs independent gates for:
 
-- frontend lint, TypeScript typecheck, and production build;
+- frontend dependency audits, lint, TypeScript typecheck, and production build;
 - deterministic Harvester tests;
 - deterministic Publisher tests;
 - PostgreSQL migration/RLS contract tests;
 - Chromium browser E2E for locale handling, public failure states, unauthenticated routing, ordinary-user authorization denial, and administrator access;
 - browser accessibility regressions for labels, keyboard navigation, dialog semantics, focus restoration, and representative structural checks;
-- Python dependency auditing plus frontend npm dependency diagnostics/remediation validation;
+- Python dependency auditing;
 - full-history committed-secret scanning with a pinned/checksummed Gitleaks binary;
 - commit-pinned CodeQL analysis for JavaScript/TypeScript and Python.
 
 Browser tests run the production Next.js server against a repository-owned loopback Supabase HTTP fixture. The fixture uses synthetic users and news records only; no production credentials, production Supabase project, live feeds, Ollama, GPU, or Hyper-V environment are required. Failure runs preserve application/fixture logs and a diagnostic screenshot as short-lived GitHub Actions artifacts.
 
-The checked-in frontend npm audit is considered a blocking security claim only after the remediated lockfile is committed and the audit step itself is blocking. During an active remediation workstream it may remain diagnostic while a generated candidate is independently required to pass clean audits, deterministic install, lint, typecheck, and production build. The related P1 remains open until that transition is complete.
+The checked-in frontend package manifests are the audited dependency state. Both production-only and full-tree npm audits are blocking CI checks at high severity or above; a generated candidate is never treated as a passing security claim until its manifests are committed.
 
 See [`docs/testing.md`](docs/testing.md) for deterministic local execution and test-boundary details.
 
@@ -132,7 +132,7 @@ To grant administrative access in an environment, insert the intended authentica
 - External publishers and feeds can change markup, metadata, availability, or rate behavior without notice.
 - Local Ollama inference is optional for the production pipeline but deliberately excluded from deterministic CI.
 - The browser Supabase fixture is a deterministic contract double, not a replacement for a production-environment smoke test.
-- Dependency scanners depend on upstream advisory data and cannot prove the absence of every vulnerability; current remediation state must be read together with the active security issue/PR.
+- Dependency scanners depend on upstream advisory data and cannot prove the absence of undisclosed or not-yet-published vulnerabilities.
 - Production Supabase migrations must be reviewed against existing data before deployment; the uniqueness migration intentionally does not silently delete duplicate records.
 - Hyper-V orchestration is environment-specific and should not be treated as the only supported development path.
 
