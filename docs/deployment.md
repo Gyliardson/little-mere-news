@@ -112,9 +112,36 @@ A deployment without Ollama can still build/test the repository; live ingestion 
 
 ### Optional Hyper-V topology
 
-`Infrastructure/Run-LMN-Batch.ps1` preserves the original Windows/Hyper-V topology while enforcing the durable ownership protocol:
+`Infrastructure/Run-LMN-Batch.ps1` preserves the original Windows/Hyper-V topology while enforcing the durable ownership protocol and a strict SSH trust boundary.
 
-- every SSH/SCP boundary is checked;
+#### SSH host identity
+
+The orchestrator uses `StrictHostKeyChecking=yes`, `BatchMode=yes` and an explicit `known_hosts` file. By default it uses the current account's standard `~/.ssh/known_hosts`; set `LMN_KNOWN_HOSTS_FILE` to an alternate file when the batch host uses a dedicated trust store. The file must already exist before a batch starts.
+
+Enroll the Harvester (`10.0.100.10`) and Publisher (`10.0.100.30`) host keys only after comparing their fingerprints through a trusted channel, such as the VM console or a separately authenticated administrative path. `ssh-keyscan` can collect candidate public host keys, but **do not treat `ssh-keyscan` output obtained over the same untrusted network as proof of server identity**. One safe workflow is to collect candidate keys, inspect their fingerprints with `ssh-keygen -lf`, compare those fingerprints with the VM console, and only then append the verified keys to the configured `known_hosts` file.
+
+Because `BatchMode=yes` disables interactive password/host-key prompts, the orchestration account must also have non-interactive SSH authentication configured beforehand. Unknown or changed host keys fail closed rather than being silently accepted.
+
+#### Publisher secret provisioning
+
+The Hyper-V orchestrator no longer reads or sends `SUPABASE_URL` / `SUPABASE_KEY` from the Windows host command line. Provision these values directly on the trusted Publisher VM in the shell-compatible file:
+
+`/home/lmnadmin/.config/lmn/publisher.env`
+
+For example, from a trusted Publisher console/admin session, create the directory/file without placing real values in shell history where possible, then enforce owner-only permissions:
+
+```bash
+mkdir -p /home/lmnadmin/.config/lmn
+chmod 700 /home/lmnadmin/.config/lmn
+chmod 600 /home/lmnadmin/.config/lmn/publisher.env
+```
+
+The file must define non-empty `SUPABASE_URL` and `SUPABASE_KEY` values. It is an external deployment secret and must never be committed. The orchestrator verifies that the file is readable and that both variables exist after sourcing it, but does not echo their values. Queue-path variables remain non-secret orchestration arguments.
+
+The orchestrator then enforces the operational contract:
+
+- every SSH/SCP boundary uses the verified host-key trust store;
+- the Publisher credential remains server-side on the Publisher VM instead of being interpolated into SSH command arguments;
 - a failed Harvester exits the batch without deleting pending state;
 - the Harvester source file is deleted only after Publisher inbound transfer succeeds;
 - Publisher inbound never overwrites Publisher retry state;
@@ -165,6 +192,7 @@ Deterministic CI cannot prove DNS, hosted Supabase networking, production secret
 - Harvester pending → Publisher inbound ownership transfer preserves any Publisher retry file;
 - a retained transient Publisher failure survives a subsequent inbound batch;
 - a permanent Publisher failure is quarantined and is not retried automatically;
+- Hyper-V deployments reject unknown/changed SSH host keys and load Publisher secrets only from the trusted Publisher-side environment file;
 - Harvester/provider connectivity is checked separately if live ingestion is enabled.
 
 Do not put production secrets or personal data into CI fixtures or screenshots to obtain this evidence.
@@ -172,6 +200,8 @@ Do not put production secrets or personal data into CI fixtures or screenshots t
 ## What is intentionally manual
 
 The repository does not automatically provision or mutate a production Supabase project from pull-request CI. Creating the hosted project, configuring production secrets, creating a real administrator account and applying reviewed production migrations are external deployment actions.
+
+For the optional Hyper-V path, verifying/enrolling VM host-key fingerprints, provisioning non-interactive SSH credentials and creating the Publisher-side `publisher.env` file are explicit manual trust/secret setup steps. They are intentionally not automated from repository CI because CI does not possess production VM identity or credentials.
 
 Likewise, provisioning Hyper-V hosts, GPU drivers or local Ollama models is optional environment-specific work and is not a certification dependency for deterministic repository quality gates.
 
@@ -183,4 +213,4 @@ Likewise, provisioning Hyper-V hosts, GPU drivers or local Ollama models is opti
 - production data can expose migration conflicts absent from an empty disposable database;
 - file-based handoff depends on durable local/shared storage and the documented ownership transfer;
 - quarantined Publisher items require operator review rather than automatic retry;
-- optional local infrastructure depends on host/network configuration outside the repository.
+- optional local infrastructure depends on correctly provisioned host keys, SSH credentials, VM-local secrets and host/network configuration outside the repository.
