@@ -1,9 +1,11 @@
 import calendar
 import fcntl
+import http.client
 import ipaddress
 import json
 import os
 import socket
+import ssl
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,8 +29,48 @@ SOURCE_TIMEOUT_SECONDS = 15
 AI_TIMEOUT_SECONDS = 60
 MAX_RETRIES = 2
 MAX_REDIRECTS = 5
+MAX_FEED_BYTES = 5 * 1024 * 1024
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 AI_REQUIRED_FIELDS = ("title_en", "title_pt", "summary_en", "summary_pt")
+
+
+class FeedTransportError(Exception):
+    """Raised when the bounded external-feed transport cannot complete safely."""
+
+
+class FeedHTTPResponse:
+    """Minimal response contract consumed by fetch_feed()."""
+
+    def __init__(self, status_code, headers, content):
+        self.status_code = status_code
+        self.headers = headers
+        self.content = content
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise FeedTransportError(f"Feed returned HTTP {self.status_code}")
+
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that dials a validated IP while verifying the original hostname."""
+
+    def __init__(self, address, hostname, port, timeout):
+        super().__init__(
+            hostname,
+            port=port,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+        self._pinned_address = str(address)
+
+    def connect(self):
+        original_host = self.host
+        self.host = self._pinned_address
+        try:
+            http.client.HTTPConnection.connect(self)
+        finally:
+            self.host = original_host
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=original_host)
 
 
 def clean_html(raw_html):
@@ -86,8 +128,8 @@ def _resolved_addresses(hostname, port, resolver=socket.getaddrinfo):
     return addresses
 
 
-def validate_feed_target(value, resolver=socket.getaddrinfo):
-    """Require an external HTTP(S) feed target resolving only to public IP space."""
+def resolve_feed_target(value, resolver=socket.getaddrinfo):
+    """Validate a feed URL and return the exact public addresses approved for connection."""
     if not isinstance(value, str):
         raise ValueError(f"Invalid feed URL: {value!r}")
     normalized = value.strip()
@@ -108,7 +150,80 @@ def validate_feed_target(value, resolver=socket.getaddrinfo):
             f"Feed target {parsed.hostname!r} resolves to forbidden non-public address(es): "
             + ", ".join(forbidden)
         )
+    approved = tuple(sorted(addresses, key=lambda address: (address.version, int(address))))
+    return normalized, approved
+
+
+def validate_feed_target(value, resolver=socket.getaddrinfo):
+    """Require an external HTTP(S) feed target resolving only to public IP space."""
+    normalized, _ = resolve_feed_target(value, resolver=resolver)
     return normalized
+
+
+def _host_header(parsed):
+    hostname = parsed.hostname or ""
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"Invalid feed URL port: {parsed.geturl()!r}") from exc
+    default_port = 443 if parsed.scheme == "https" else 80
+    return f"{host}:{port}" if port is not None and port != default_port else host
+
+
+def _request_target(parsed):
+    target = parsed.path or "/"
+    if parsed.params:
+        target += f";{parsed.params}"
+    if parsed.query:
+        target += f"?{parsed.query}"
+    return target
+
+
+def pinned_feed_request(url, address, timeout=SOURCE_TIMEOUT_SECONDS):
+    """Connect to one already-approved IP without performing a second DNS lookup."""
+    parsed = urlparse(url)
+    if not parsed.hostname or parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"Invalid feed URL: {url!r}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    connection = None
+    try:
+        if parsed.scheme == "https":
+            connection = PinnedHTTPSConnection(
+                address=address,
+                hostname=parsed.hostname,
+                port=port,
+                timeout=timeout,
+            )
+        else:
+            connection = http.client.HTTPConnection(str(address), port=port, timeout=timeout)
+
+        connection.request(
+            "GET",
+            _request_target(parsed),
+            headers={
+                "Host": _host_header(parsed),
+                "User-Agent": "Little-Mere-News-Harvester/1.0",
+                "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*;q=0.1",
+                "Connection": "close",
+            },
+        )
+        response = connection.getresponse()
+        content = response.read(MAX_FEED_BYTES + 1)
+        if len(content) > MAX_FEED_BYTES:
+            raise FeedTransportError(
+                f"Feed response exceeds {MAX_FEED_BYTES} byte safety limit"
+            )
+        return FeedHTTPResponse(
+            status_code=response.status,
+            headers={key: value for key, value in response.getheaders()},
+            content=content,
+        )
+    except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
+        raise FeedTransportError(str(exc)) from exc
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def validate_ai_result(value):
@@ -191,33 +306,26 @@ Article Excerpt:
         return None
 
 
-def _request_without_redirects(session, url):
-    """Perform one bounded GET without allowing the HTTP client to follow redirects."""
-    return session.get(url, timeout=SOURCE_TIMEOUT_SECONDS, allow_redirects=False)
-
-
-def fetch_feed(feed_url, session=requests, resolver=socket.getaddrinfo):
-    """Fetch one external feed while enforcing network policy on every hop."""
+def fetch_feed(feed_url, resolver=socket.getaddrinfo, transport=pinned_feed_request):
+    """Fetch one external feed while pinning every request to a validated public IP."""
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
         try:
-            current_url = validate_feed_target(feed_url, resolver=resolver)
+            current_url = feed_url
             for redirect_count in range(MAX_REDIRECTS + 1):
-                # Re-resolve immediately before every request so a hostname that has
-                # changed to private/link-local space is rejected before contact.
-                current_url = validate_feed_target(current_url, resolver=resolver)
-                response = _request_without_redirects(session, current_url)
-                status_code = getattr(response, "status_code", 200)
+                current_url, approved_addresses = resolve_feed_target(
+                    current_url, resolver=resolver
+                )
+                response = transport(current_url, approved_addresses[0])
+                status_code = response.status_code
 
                 if status_code in REDIRECT_STATUSES:
                     if redirect_count >= MAX_REDIRECTS:
                         raise ValueError("Feed redirect limit exceeded")
-                    location = getattr(response, "headers", {}).get("Location")
+                    location = response.headers.get("Location")
                     if not location:
                         raise ValueError("Feed redirect is missing Location header")
-                    current_url = validate_feed_target(
-                        urljoin(current_url, location), resolver=resolver
-                    )
+                    current_url = urljoin(current_url, location)
                     continue
 
                 response.raise_for_status()
@@ -229,7 +337,7 @@ def fetch_feed(feed_url, session=requests, resolver=socket.getaddrinfo):
                 return parsed
 
             raise ValueError("Feed redirect limit exceeded")
-        except (requests.RequestException, ValueError) as exc:
+        except (FeedTransportError, ValueError) as exc:
             last_error = exc
             if attempt < MAX_RETRIES:
                 time.sleep(0.5 * (attempt + 1))
