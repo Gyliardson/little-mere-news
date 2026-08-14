@@ -1,6 +1,8 @@
+import fcntl
 import json
 import os
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -62,6 +64,40 @@ def get_queue_paths(environ=None):
         )
 
     return input_file, retry_file, rejected_file
+
+
+def get_queue_lock_path(input_file, retry_file, rejected_file):
+    """Derive one lock file for the configured Publisher queue ownership set."""
+    retry_file = Path(retry_file)
+    lock_path = retry_file.with_name(f".{retry_file.name}.lock")
+    resolved_lock = lock_path.resolve(strict=False)
+    queue_paths = {
+        Path(input_file).resolve(strict=False),
+        retry_file.resolve(strict=False),
+        Path(rejected_file).resolve(strict=False),
+    }
+    if resolved_lock in queue_paths:
+        raise ValueError("Publisher queue lock path must be distinct from queue files")
+    return lock_path
+
+
+@contextmanager
+def publisher_queue_lock(lock_path):
+    """Fail closed when another process already owns this Publisher queue set."""
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_handle = lock_path.open("a+", encoding="utf-8")
+    try:
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise RuntimeError("another Publisher process already owns this queue set") from exc
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_handle.close()
 
 
 def validate_item(item):
@@ -210,21 +246,8 @@ def append_rejected(rejected_file, rejected):
     atomic_write_json(rejected_file, [*existing_rejected, *rejected])
 
 
-def main():
-    print("[1/3] Initializing Publisher...")
-
-    supabase_url = os.environ.get("SUPABASE_URL")
-    supabase_key = os.environ.get("SUPABASE_KEY")
-    if not supabase_url or not supabase_key:
-        print("[FATAL] SUPABASE_URL and SUPABASE_KEY must be set in the environment.")
-        return 1
-
-    try:
-        input_file, retry_file, rejected_file = get_queue_paths()
-    except ValueError as exc:
-        print(f"[FATAL] Invalid publisher queue configuration: {exc}")
-        return 1
-
+def run_locked_publisher(input_file, retry_file, rejected_file, supabase_url, supabase_key):
+    """Execute the complete read/process/persist/unlink lifecycle under one queue owner."""
     if not input_file.exists() and not retry_file.exists():
         print("[INFO] No inbound or retry queue found. Nothing to publish.")
         return 0
@@ -273,6 +296,36 @@ def main():
     # a partially unsuccessful batch as green. Quarantined items are not reprocessed
     # on later no-work runs because they live outside inbound/retry ownership.
     return 1 if retry_queue or rejected else 0
+
+
+def main():
+    print("[1/3] Initializing Publisher...")
+
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_KEY")
+    if not supabase_url or not supabase_key:
+        print("[FATAL] SUPABASE_URL and SUPABASE_KEY must be set in the environment.")
+        return 1
+
+    try:
+        input_file, retry_file, rejected_file = get_queue_paths()
+        lock_path = get_queue_lock_path(input_file, retry_file, rejected_file)
+    except ValueError as exc:
+        print(f"[FATAL] Invalid publisher queue configuration: {exc}")
+        return 1
+
+    try:
+        with publisher_queue_lock(lock_path):
+            return run_locked_publisher(
+                input_file,
+                retry_file,
+                rejected_file,
+                supabase_url,
+                supabase_key,
+            )
+    except (OSError, RuntimeError) as exc:
+        print(f"[FATAL] Could not acquire Publisher queue ownership: {exc}")
+        return 1
 
 
 if __name__ == "__main__":
