@@ -17,6 +17,26 @@ async function fixturePost(path, body) {
   assert.equal(response.status, 200);
 }
 
+async function openAuthorizedNewsManager(page) {
+  await page.goto(`${baseURL}/en/ci-admin/login`, { waitUntil: "domcontentloaded" });
+  await page.getByLabel("Corporate Email").fill("admin@example.test");
+  await page.getByLabel("Password").fill("admin-password");
+  await page.getByRole("button", { name: "Authenticate" }).click();
+  await page.getByRole("heading", { name: "Overview" }).waitFor();
+  await page.goto(`${baseURL}/en/ci-admin/news`, { waitUntil: "domcontentloaded" });
+  await page.getByRole("heading", { name: "News Manager" }).waitFor();
+}
+
+async function invalidatePublicIsrThroughRealMutation(page) {
+  await page.getByRole("button", { name: /Edit: Deterministic AI fixture/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Edit News" });
+  const title = dialog.getByLabel("Title (EN)");
+  const original = await title.inputValue();
+  await title.fill(`${original} revalidate`);
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  await page.getByRole("status").filter({ hasText: "News updated successfully." }).waitFor();
+}
+
 before(async () => {
   browser = await chromium.launch({ headless: true });
   await fixturePost("/__test__/reset");
@@ -32,19 +52,6 @@ test("unsupported locale returns not found", async () => {
   const response = await page.goto(`${baseURL}/fr`, { waitUntil: "domcontentloaded" });
   assert.equal(response?.status(), 404);
   await page.close();
-});
-
-test("public feed renders a user-safe provider failure state", async () => {
-  await fixturePost("/__test__/news-error", { enabled: true });
-  const page = await browser.newPage();
-  const response = await page.goto(`${baseURL}/en`, { waitUntil: "domcontentloaded" });
-  assert.equal(response?.status(), 200);
-  const alert = page.getByRole("alert");
-  await alert.waitFor();
-  assert.match(await alert.textContent(), /News could not be loaded/);
-  assert.doesNotMatch(await alert.textContent(), /E2E_PROVIDER_FAILURE|synthetic provider failure/i);
-  await page.close();
-  await fixturePost("/__test__/news-error", { enabled: false });
 });
 
 test("existing public article renders deterministic content", async () => {
@@ -65,6 +72,29 @@ test("missing public article returns not found", async () => {
   });
   assert.equal(response?.status(), 404);
   await page.close();
+});
+
+test("public feed renders a user-safe provider failure after real ISR invalidation", async () => {
+  await fixturePost("/__test__/reset");
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await context.newPage();
+
+  try {
+    await openAuthorizedNewsManager(page);
+    await fixturePost("/__test__/news-error", { enabled: true });
+    await invalidatePublicIsrThroughRealMutation(page);
+
+    const response = await page.goto(`${baseURL}/en`, { waitUntil: "domcontentloaded" });
+    assert.equal(response?.status(), 200);
+    const alert = page.getByRole("alert").filter({ hasText: "News could not be loaded" });
+    await alert.waitFor();
+    const text = (await alert.textContent()) ?? "";
+    assert.match(text, /News could not be loaded/);
+    assert.doesNotMatch(text, /E2E_PROVIDER_FAILURE|synthetic provider failure/i);
+  } finally {
+    await fixturePost("/__test__/news-error", { enabled: false });
+    await context.close();
+  }
 });
 
 test("dashboard without a session returns to login", async () => {
