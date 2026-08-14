@@ -168,11 +168,17 @@ test("admin update crosses Server Action and ordinary user cannot replay the mut
   const viewerContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const viewerPage = await viewerContext.newPage();
   await signIn(viewerPage, "viewer@example.test", "viewer-password");
-  await viewerPage.getByRole("heading", { name: "Restricted Access" }).waitFor();
+
+  // The login page already contains the Restricted Access heading before submit.
+  // Waiting on that heading alone can race cookie persistence and produce an
+  // unauthenticated replay. Require the protected-route authorization redirect first.
+  await viewerPage.waitForURL(`${baseURL}/en/ci-admin/login?error=forbidden`);
+  const viewerCookie = await viewerCookieHeader(viewerContext);
+  assert.ok(viewerCookie, "viewer auth cookie must be persisted before replaying the Server Action");
 
   const headers = {
     ...captured.headers,
-    cookie: await viewerCookieHeader(viewerContext),
+    cookie: viewerCookie,
     origin: baseURL,
     referer: `${baseURL}/en/ci-admin/news`,
   };
