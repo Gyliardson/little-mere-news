@@ -22,11 +22,24 @@ def test_iso_requires_explicit_sha256_before_reuse_or_provisioning():
     assert "Assert-LmnIsoDigestConfiguration" in script
     assert "Assert-LmnIsoIntegrity -Path $ISOFullPath" in script
     assert "Refusing to use unverified boot media" in script
-    assert script.index("Invoke-ISODownload") < script.index("Invoke-VMProvisioning")
+
+    main = script.split("# Stage 1: Hyper-V Check", 1)[1]
+    assert main.index("Assert-LmnIsoDigestConfiguration") < main.index("Invoke-NetworkSetup")
+    assert main.index("Invoke-ISODownload") < main.index("Invoke-VMProvisioning")
+
+
+def test_default_iso_source_is_current_explicit_and_overridable():
+    script = SETUP.read_text(encoding="utf-8")
+
+    assert "LMN_UBUNTU_ISO_URL" in script
+    assert "ubuntu-24.04.4-live-server-amd64.iso" in script
+    assert "ubuntu-24.04.2-live-server-amd64.iso" not in script
+    assert 'Scheme -ne "https"' in script
 
 
 def test_root_env_example_documents_trusted_iso_digest_input():
     example = ENV_EXAMPLE.read_text(encoding="utf-8")
 
     assert "LMN_UBUNTU_ISO_SHA256" in example
+    assert "LMN_UBUNTU_ISO_URL" in example
     assert "official Ubuntu release manifest" in example
