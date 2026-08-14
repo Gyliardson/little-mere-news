@@ -65,6 +65,24 @@ test("existing public article renders deterministic content", async () => {
   await page.close();
 });
 
+test("effective public layout renders the optimized Next Image logo", async () => {
+  const page = await browser.newPage();
+  const response = await page.goto(`${baseURL}/en/news/${existingArticleId}`, {
+    waitUntil: "domcontentloaded",
+  });
+  assert.equal(response?.status(), 200);
+
+  const logo = page.locator('header img[alt="Little Mere News Logo"]');
+  await logo.waitFor();
+  assert.equal(await logo.count(), 1);
+  const source = await logo.getAttribute("src");
+  assert.match(source ?? "", /^\/_next\/image\?url=%2Flogo\.png(?:&|$)/);
+  assert.equal(await logo.getAttribute("width"), "40");
+  assert.equal(await logo.getAttribute("height"), "40");
+
+  await page.close();
+});
+
 test("missing public article returns not found", async () => {
   const page = await browser.newPage();
   const response = await page.goto(`${baseURL}/en/news/${missingArticleId}`, {
