@@ -63,7 +63,9 @@ The repository currently reviews:
 
 The guest script downloads only that versioned release installer asset, verifies its SHA-256 before execution, passes the explicit Ollama version to the installer, pulls `llama3:8b`, then queries the local Ollama API and refuses the model if its full digest no longer begins with the reviewed identifier.
 
-The model-library identifier is intentionally recorded as the 12-hex content identifier displayed by the official Ollama library, not misrepresented as a repository-known full SHA-256. If the upstream tag moves, bootstrap fails and requires an explicit repository review/update rather than silently accepting new model behavior.
+The Harvester's historical default model name is `llama3:latest`. The bootstrap does **not** trust or pull the upstream mutable `latest` tag. After verifying `llama3:8b`, it creates the local compatibility alias `llama3:latest` from that already-verified local content with `ollama cp`. This preserves the existing runtime contract without allowing an upstream tag movement to silently replace the reviewed model.
+
+The model-library identifier is intentionally recorded as the 12-hex content identifier displayed by the official Ollama library, not misrepresented as a repository-known full SHA-256. If the upstream `llama3:8b` tag moves, bootstrap fails and requires an explicit repository review/update rather than silently accepting new model behavior.
 
 Residual trust remains: the verified Ollama installer itself downloads the selected Ollama package over HTTPS, and the model registry remains an external source. The checksum/version boundary prevents executing a newly changed installer unnoticed; it is not a claim that the entire external software/model supply chain is independently reproducibly built by this repository.
 
