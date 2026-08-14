@@ -107,6 +107,33 @@ test("missing public article returns not found", async () => {
   await page.close();
 });
 
+test("existing article provider failure renders unavailable state instead of not found", async () => {
+  await fixturePost("/__test__/reset");
+  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const page = await context.newPage();
+
+  try {
+    await openAuthorizedNewsManager(page);
+    await fixturePost("/__test__/news-error", { enabled: true });
+    await invalidatePublicIsrThroughRealMutation(page);
+
+    const response = await page.goto(`${baseURL}/en/news/${existingArticleId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    assert.notEqual(response?.status(), 404);
+
+    const alert = page.getByRole("alert").filter({ hasText: "Article temporarily unavailable" });
+    await alert.waitFor();
+    const text = (await alert.textContent()) ?? "";
+    assert.match(text, /Article temporarily unavailable/);
+    assert.match(text, /does not mean it was removed/i);
+    assert.doesNotMatch(text, /E2E_PROVIDER_FAILURE|synthetic provider failure/i);
+  } finally {
+    await fixturePost("/__test__/news-error", { enabled: false });
+    await context.close();
+  }
+});
+
 test("public feed renders a user-safe provider failure after real ISR invalidation", async () => {
   await fixturePost("/__test__/reset");
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
