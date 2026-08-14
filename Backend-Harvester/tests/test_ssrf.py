@@ -11,6 +11,7 @@ assert spec.loader is not None
 spec.loader.exec_module(harvester)
 
 PUBLIC_IP = "93.184.216.34"
+SECOND_PUBLIC_IP = "93.184.216.35"
 
 
 def resolver(mapping):
@@ -36,33 +37,32 @@ class Response:
         self.content = content or b"<rss><channel><title>Source</title></channel></rss>"
 
     def raise_for_status(self):
-        return None
+        if self.status_code >= 400:
+            raise harvester.FeedTransportError(f"HTTP {self.status_code}")
 
 
-class Session:
+class Transport:
     def __init__(self, responses):
         self.responses = list(responses)
         self.calls = []
 
-    def get(self, url, timeout, allow_redirects):
-        self.calls.append((url, timeout, allow_redirects))
+    def __call__(self, url, address):
+        self.calls.append((url, str(address)))
         if not self.responses:
-            pytest.fail(f"unexpected network contact: {url}")
+            pytest.fail(f"unexpected network contact: {url} -> {address}")
         return self.responses.pop(0)
 
 
-def test_public_feed_succeeds_without_automatic_redirects():
-    session = Session([Response()])
+def test_public_feed_is_contacted_only_at_validated_ip():
+    transport = Transport([Response()])
     parsed = harvester.fetch_feed(
         "https://public.example/feed",
-        session=session,
+        transport=transport,
         resolver=resolver({"public.example": PUBLIC_IP}),
     )
 
     assert parsed.feed.title == "Source"
-    assert session.calls == [
-        ("https://public.example/feed", harvester.SOURCE_TIMEOUT_SECONDS, False)
-    ]
+    assert transport.calls == [("https://public.example/feed", PUBLIC_IP)]
 
 
 @pytest.mark.parametrize(
@@ -76,17 +76,17 @@ def test_public_feed_succeeds_without_automatic_redirects():
     ],
 )
 def test_non_public_initial_target_is_never_contacted(monkeypatch, target, address):
-    session = Session([])
+    transport = Transport([])
     monkeypatch.setattr(harvester.time, "sleep", lambda _: None)
 
     with pytest.raises(RuntimeError, match="forbidden non-public"):
         harvester.fetch_feed(
             target,
-            session=session,
+            transport=transport,
             resolver=resolver({target.split("//", 1)[1].split("/", 1)[0]: address}),
         )
 
-    assert session.calls == []
+    assert transport.calls == []
 
 
 @pytest.mark.parametrize(
@@ -109,43 +109,79 @@ def test_redirect_to_non_public_target_is_rejected_before_contact(
     responses = [
         Response(302, location=redirect_url) for _ in range(harvester.MAX_RETRIES + 1)
     ]
-    session = Session(responses)
+    transport = Transport(responses)
     monkeypatch.setattr(harvester.time, "sleep", lambda _: None)
     resolve = resolver({"public.example": PUBLIC_IP, redirect_host: address})
 
     with pytest.raises(RuntimeError, match="forbidden non-public"):
-        harvester.fetch_feed("https://public.example/feed", session=session, resolver=resolve)
+        harvester.fetch_feed(
+            "https://public.example/feed",
+            transport=transport,
+            resolver=resolve,
+        )
 
-    assert [call[0] for call in session.calls] == [
-        "https://public.example/feed"
+    assert transport.calls == [
+        ("https://public.example/feed", PUBLIC_IP)
     ] * (harvester.MAX_RETRIES + 1)
-    assert all(redirect_host not in call[0] for call in session.calls)
 
 
 def test_hostname_resolving_private_is_rejected_without_contact(monkeypatch):
-    session = Session([])
+    transport = Transport([])
     monkeypatch.setattr(harvester.time, "sleep", lambda _: None)
 
     with pytest.raises(RuntimeError, match="forbidden non-public"):
         harvester.fetch_feed(
             "https://ordinary-name.example/feed",
-            session=session,
+            transport=transport,
             resolver=resolver({"ordinary-name.example": "192.168.1.20"}),
         )
 
-    assert session.calls == []
+    assert transport.calls == []
+
+
+def test_dns_answer_is_pinned_for_each_request_and_cannot_rebind_inside_transport():
+    answers = iter([PUBLIC_IP, SECOND_PUBLIC_IP])
+
+    def changing_resolver(host, port, type=socket.SOCK_STREAM):
+        address = next(answers)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    transport = Transport([Response(302, location="/next"), Response()])
+    parsed = harvester.fetch_feed(
+        "https://rebind.example/feed",
+        transport=transport,
+        resolver=changing_resolver,
+    )
+
+    assert parsed.feed.title == "Source"
+    assert transport.calls == [
+        ("https://rebind.example/feed", PUBLIC_IP),
+        ("https://rebind.example/next", SECOND_PUBLIC_IP),
+    ]
+
+
+def test_transport_never_receives_hostname_as_connection_destination():
+    transport = Transport([Response()])
+    harvester.fetch_feed(
+        "https://public.example/feed",
+        transport=transport,
+        resolver=resolver({"public.example": PUBLIC_IP}),
+    )
+
+    assert transport.calls[0][1] == PUBLIC_IP
+    assert transport.calls[0][1] != "public.example"
 
 
 def test_redirect_count_is_bounded(monkeypatch):
     total_requests = (harvester.MAX_REDIRECTS + 1) * (harvester.MAX_RETRIES + 1)
-    session = Session([Response(302, location="/again") for _ in range(total_requests)])
+    transport = Transport([Response(302, location="/again") for _ in range(total_requests)])
     monkeypatch.setattr(harvester.time, "sleep", lambda _: None)
 
     with pytest.raises(RuntimeError, match="redirect limit exceeded"):
         harvester.fetch_feed(
             "https://public.example/feed",
-            session=session,
+            transport=transport,
             resolver=resolver({"public.example": PUBLIC_IP}),
         )
 
-    assert len(session.calls) == total_requests
+    assert len(transport.calls) == total_requests
