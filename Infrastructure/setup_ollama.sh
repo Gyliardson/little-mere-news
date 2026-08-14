@@ -11,6 +11,7 @@ OLLAMA_MODEL="llama3:8b"
 # The API returns the full digest; matching this reviewed 12-hex prefix prevents a
 # silently moved tag from being accepted without a repository review/update.
 OLLAMA_MODEL_DIGEST_PREFIX="365c0bd3c000"
+OLLAMA_RUNTIME_ALIAS="llama3:latest"
 
 if [[ ! "$OLLAMA_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "[ERROR] Invalid reviewed Ollama version." >&2
@@ -90,6 +91,11 @@ case "$ACTUAL_DIGEST" in
     ;;
 esac
 
+# Harvester historically requests llama3:latest. Preserve that runtime contract without
+# trusting the upstream mutable latest tag: make the local alias from the content that
+# was just verified against the reviewed llama3:8b identifier.
+ollama cp "$OLLAMA_MODEL" "$OLLAMA_RUNTIME_ALIAS"
+
 ollama --version
-echo "Verified model ${OLLAMA_MODEL} digest ${ACTUAL_DIGEST}."
+echo "Verified model ${OLLAMA_MODEL} digest ${ACTUAL_DIGEST}; local runtime alias ${OLLAMA_RUNTIME_ALIAS} now points to that reviewed content."
 echo "Ollama provisioning completed with reviewed version and model boundaries."
