@@ -139,7 +139,15 @@ The launcher does not interpolate `SUPABASE_URL` or `SUPABASE_KEY` from the Wind
 
 `/home/lmnadmin/.config/lmn/publisher.env`
 
-Use owner-only directory/file permissions and never commit the values. The launcher verifies the file/variables exist without printing secret values.
+Use owner-only permissions. A representative setup is:
+
+```bash
+mkdir -p /home/lmnadmin/.config/lmn
+chmod 700 /home/lmnadmin/.config/lmn
+chmod 600 /home/lmnadmin/.config/lmn/publisher.env
+```
+
+The environment file itself contains deployment-specific values and must never be committed. The launcher verifies that it is readable and that the required variables exist without printing secret values.
 
 ### Worker transfer and dependency bootstrap
 
