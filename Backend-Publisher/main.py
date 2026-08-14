@@ -6,8 +6,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
-import httpx
 from supabase import Client, create_client
+
+from failure_policy import is_retryable_publish_exception
 
 # ==========================================
 # Little Mere News - Publisher Script
@@ -181,16 +182,16 @@ def publish_item(client, item):
 
 
 def publish_with_retry(client, item, sleep_fn=time.sleep):
-    """Retry only transient transport failures with a bounded attempt count."""
+    """Retry only explicitly classified transient failures with a bounded attempt count."""
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             return publish_item(client, item)
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except Exception as exc:
+            if not is_retryable_publish_exception(exc):
+                return "permanent_failure", exc
             if attempt == MAX_ATTEMPTS:
                 return "retryable_failure", exc
             sleep_fn(RETRY_BACKOFF_SECONDS * attempt)
-        except Exception as exc:
-            return "permanent_failure", exc
 
     raise AssertionError("unreachable")
 
