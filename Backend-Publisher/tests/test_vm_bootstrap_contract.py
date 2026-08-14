@@ -45,6 +45,8 @@ def test_guest_python_setup_consumes_transferred_requirements_not_bare_packages(
 
 def test_supported_host_bootstrap_transfers_canonical_requirements():
     bootstrap = (INFRA / "Bootstrap-LMN-Guests.ps1").read_text(encoding="utf-8")
+    infrastructure_setup = (INFRA / "Setup-LMN-Infrastructure.ps1").read_text(encoding="utf-8")
+
     assert 'Backend-Harvester\\requirements.txt' in bootstrap
     assert 'Backend-Publisher\\requirements.txt' in bootstrap
     assert "harvester-requirements.txt" in bootstrap
@@ -54,6 +56,9 @@ def test_supported_host_bootstrap_transfers_canonical_requirements():
     assert "StrictHostKeyChecking=yes" in bootstrap
     assert "sudo bash '$RemoteBootstrapDir/setup_harvester.sh' '$RemoteBootstrapDir/harvester-requirements.txt'" in bootstrap
     assert "sudo bash '$RemoteBootstrapDir/setup_publisher.sh' '$RemoteBootstrapDir/publisher-requirements.txt'" in bootstrap
+
+    assert "Bootstrap-LMN-Guests.ps1" in infrastructure_setup
+    assert "Execute the Python setup scripts on the respective instances." not in infrastructure_setup
 
 
 def test_ollama_bootstrap_is_version_and_integrity_bounded():
@@ -68,7 +73,9 @@ def test_ollama_bootstrap_is_version_and_integrity_bounded():
 
     assert 'OLLAMA_MODEL="llama3:8b"' in script
     assert 'OLLAMA_MODEL_DIGEST_PREFIX="365c0bd3c000"' in script
+    assert 'OLLAMA_RUNTIME_ALIAS="llama3:latest"' in script
     assert "api/tags" in script
     assert "does not match the repository-reviewed identity" in script
     assert 'ollama pull "$OLLAMA_MODEL"' in script
+    assert 'ollama cp "$OLLAMA_MODEL" "$OLLAMA_RUNTIME_ALIAS"' in script
     assert "ollama pull llama3\n" not in script
