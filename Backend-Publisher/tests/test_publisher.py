@@ -186,15 +186,15 @@ def test_process_batch_preserves_partial_failures_and_quarantines_invalid():
     assert rejected == [{"bad": "payload"}]
 
 
-def test_process_batch_preserves_non_transport_database_failure():
+def test_process_batch_quarantines_non_transport_database_failure():
     item = valid_item(source_url="https://example.com/db-failure")
     client = FakeClient([RuntimeError("database rejected write")])
 
     counts, retry_queue, rejected = publisher.process_batch(client, [item])
 
     assert counts["permanent_failure"] == 1
-    assert retry_queue == [item]
-    assert rejected == []
+    assert retry_queue == []
+    assert rejected == [item]
 
 
 def configure_paths(monkeypatch, tmp_path):
@@ -224,6 +224,44 @@ def test_main_custom_paths_preserve_retry_and_rejected_payloads(monkeypatch, tmp
     assert not input_file.exists()
     assert json.loads(retry_file.read_text(encoding="utf-8")) == [failed_item]
     assert json.loads(rejected_file.read_text(encoding="utf-8")) == [{"bad": "payload"}]
+
+
+def test_main_quarantines_permanent_failure_and_does_not_retry_it_next_run(monkeypatch, tmp_path):
+    input_file, retry_file, rejected_file = configure_paths(monkeypatch, tmp_path)
+    permanent = valid_item(source_url="https://example.com/permanent", title_en="Permanent")
+    input_file.write_text(json.dumps([permanent]), encoding="utf-8")
+
+    first_client = FakeClient([RuntimeError("schema mismatch")])
+    monkeypatch.setattr(publisher, "create_client", lambda *_: first_client)
+
+    assert publisher.main() == 1
+    assert not input_file.exists()
+    assert not retry_file.exists()
+    assert json.loads(rejected_file.read_text(encoding="utf-8")) == [permanent]
+    assert [item["source_url"] for item in first_client.query.items] == [permanent["source_url"]]
+
+    # Quarantine is not an active input queue. A later no-work run succeeds and does
+    # not create a client or reattempt the permanent failure.
+    monkeypatch.setattr(
+        publisher,
+        "create_client",
+        lambda *_: pytest.fail("quarantined item must not be reprocessed"),
+    )
+    assert publisher.main() == 0
+    assert json.loads(rejected_file.read_text(encoding="utf-8")) == [permanent]
+
+
+def test_main_invalid_payload_is_quarantined_and_signaled_once(monkeypatch, tmp_path):
+    input_file, retry_file, rejected_file = configure_paths(monkeypatch, tmp_path)
+    input_file.write_text(json.dumps([{"bad": "payload"}]), encoding="utf-8")
+    monkeypatch.setattr(publisher, "create_client", lambda *_: FakeClient([]))
+
+    assert publisher.main() == 1
+    assert not input_file.exists()
+    assert not retry_file.exists()
+    assert json.loads(rejected_file.read_text(encoding="utf-8")) == [{"bad": "payload"}]
+
+    assert publisher.main() == 0
 
 
 def test_main_custom_path_removes_successfully_published_queues(monkeypatch, tmp_path):
