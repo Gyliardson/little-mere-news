@@ -54,147 +54,9 @@ class FakeClient:
         return self.query
 
 
-def test_queue_paths_preserve_safe_defaults():
-    input_file, retry_file, rejected_file = publisher.get_queue_paths({})
-
-    assert input_file == Path("/home/lmnadmin/news_to_publish.inbound.json")
-    assert retry_file == Path("/home/lmnadmin/news_to_publish.retry.json")
-    assert rejected_file == Path("/home/lmnadmin/news_to_publish.rejected.json")
-
-
-def test_queue_paths_accept_portable_overrides(tmp_path):
-    input_file, retry_file, rejected_file = publisher.get_queue_paths(
-        {
-            "LMN_INPUT_FILE": str(tmp_path / "handoff" / "news.json"),
-            "LMN_RETRY_FILE": str(tmp_path / "retry" / "retry.json"),
-            "LMN_REJECTED_FILE": str(tmp_path / "quarantine" / "rejected.json"),
-        }
-    )
-
-    assert input_file == tmp_path / "handoff" / "news.json"
-    assert retry_file == tmp_path / "retry" / "retry.json"
-    assert rejected_file == tmp_path / "quarantine" / "rejected.json"
-
-
-@pytest.mark.parametrize("same_pair", [("input", "retry"), ("input", "rejected"), ("retry", "rejected")])
-def test_queue_paths_reject_shared_ownership_paths(tmp_path, same_pair):
-    shared = tmp_path / "queue.json"
-    values = {
-        "LMN_INPUT_FILE": str(tmp_path / "input.json"),
-        "LMN_RETRY_FILE": str(tmp_path / "retry.json"),
-        "LMN_REJECTED_FILE": str(tmp_path / "rejected.json"),
-    }
-    mapping = {
-        "input": "LMN_INPUT_FILE",
-        "retry": "LMN_RETRY_FILE",
-        "rejected": "LMN_REJECTED_FILE",
-    }
-    values[mapping[same_pair[0]]] = str(shared)
-    values[mapping[same_pair[1]]] = str(shared)
-
-    with pytest.raises(ValueError, match="must be different paths"):
-        publisher.get_queue_paths(values)
-
-
-def test_queue_paths_reject_empty_override():
-    with pytest.raises(ValueError, match="LMN_REJECTED_FILE must not be empty"):
-        publisher.get_queue_paths({"LMN_REJECTED_FILE": "   "})
-
-
-def test_queue_paths_reject_existing_directory(tmp_path):
-    with pytest.raises(ValueError, match="LMN_INPUT_FILE must point to a file"):
-        publisher.get_queue_paths({"LMN_INPUT_FILE": str(tmp_path)})
-
-
-def test_validate_item_rejects_missing_fields_and_non_http_url():
-    assert publisher.validate_item(valid_item(title_en="")) is None
-    assert publisher.validate_item(valid_item(source_url="javascript:alert(1)")) is None
-    assert publisher.validate_item(["not", "an", "object"]) is None
-
-
-def test_merge_queues_deduplicates_valid_urls_but_preserves_invalid_payloads():
-    first = valid_item(source_url="https://example.com/a")
-    duplicate = valid_item(source_url="https://example.com/a", title_en="newer")
-    second = valid_item(source_url="https://example.com/b")
-    invalid = {"bad": "payload"}
-
-    assert publisher.merge_queues([first, invalid], [duplicate, second]) == [first, invalid, second]
-
-
-def test_publish_item_uses_source_url_conflict_contract():
-    client = FakeClient([[{"id": 1}]])
-    assert publisher.publish_item(client, valid_item()) == "published"
-    assert client.query.kwargs == {
-        "on_conflict": "source_url",
-        "ignore_duplicates": True,
-    }
-
-
-def test_publish_item_treats_empty_data_as_duplicate_noop():
-    client = FakeClient([[]])
-    assert publisher.publish_item(client, valid_item()) == "duplicate"
-
-
-def test_publish_with_retry_recovers_from_timeout():
+def transient_failures(count=3):
     request = httpx.Request("POST", "https://example.supabase.co")
-    timeout = httpx.ReadTimeout("timeout", request=request)
-    client = FakeClient([timeout, [{"id": 1}]])
-    sleeps = []
-
-    assert publisher.publish_with_retry(client, valid_item(), sleep_fn=sleeps.append) == "published"
-    assert sleeps == [publisher.RETRY_BACKOFF_SECONDS]
-
-
-def test_publish_with_retry_keeps_item_after_bounded_network_failure():
-    request = httpx.Request("POST", "https://example.supabase.co")
-    failures = [httpx.ConnectError("offline", request=request) for _ in range(3)]
-    client = FakeClient(failures)
-
-    result = publisher.publish_with_retry(client, valid_item(), sleep_fn=lambda _: None)
-    assert result[0] == "retryable_failure"
-
-
-def test_process_batch_preserves_partial_failures_and_quarantines_invalid():
-    request = httpx.Request("POST", "https://example.supabase.co")
-    failed_item = valid_item(source_url="https://example.com/retry", title_en="Retry")
-    client = FakeClient([
-        [{"id": 1}],
-        [],
-        httpx.ConnectError("offline", request=request),
-        httpx.ConnectError("offline", request=request),
-        httpx.ConnectError("offline", request=request),
-    ])
-    items = [
-        valid_item(source_url="https://example.com/new"),
-        valid_item(source_url="https://example.com/existing"),
-        failed_item,
-        {"bad": "payload"},
-    ]
-
-    counts, retry_queue, rejected = publisher.process_batch(
-        client, items, sleep_fn=lambda _: None
-    )
-
-    assert counts == {
-        "published": 1,
-        "duplicate": 1,
-        "retryable_failure": 1,
-        "permanent_failure": 0,
-        "invalid": 1,
-    }
-    assert retry_queue == [failed_item]
-    assert rejected == [{"bad": "payload"}]
-
-
-def test_process_batch_quarantines_non_transport_database_failure():
-    item = valid_item(source_url="https://example.com/db-failure")
-    client = FakeClient([RuntimeError("database rejected write")])
-
-    counts, retry_queue, rejected = publisher.process_batch(client, [item])
-
-    assert counts["permanent_failure"] == 1
-    assert retry_queue == []
-    assert rejected == [item]
+    return [httpx.ConnectError("offline", request=request) for _ in range(count)]
 
 
 def configure_paths(monkeypatch, tmp_path):
@@ -211,94 +73,231 @@ def configure_paths(monkeypatch, tmp_path):
     return input_file, retry_file, rejected_file
 
 
-def test_main_custom_paths_preserve_retry_and_rejected_payloads(monkeypatch, tmp_path):
-    input_file, retry_file, rejected_file = configure_paths(monkeypatch, tmp_path)
-    failed_item = valid_item(source_url="https://example.com/retry", title_en="Retry")
-    input_file.write_text(json.dumps([failed_item, {"bad": "payload"}]), encoding="utf-8")
+def test_queue_paths_preserve_defaults_and_accept_portable_overrides(tmp_path):
+    assert publisher.get_queue_paths({}) == (
+        Path("/home/lmnadmin/news_to_publish.inbound.json"),
+        Path("/home/lmnadmin/news_to_publish.retry.json"),
+        Path("/home/lmnadmin/news_to_publish.rejected.json"),
+    )
+    assert publisher.get_queue_paths(
+        {
+            "LMN_INPUT_FILE": str(tmp_path / "in.json"),
+            "LMN_RETRY_FILE": str(tmp_path / "retry.json"),
+            "LMN_REJECTED_FILE": str(tmp_path / "rejected.json"),
+        }
+    ) == (tmp_path / "in.json", tmp_path / "retry.json", tmp_path / "rejected.json")
 
+
+@pytest.mark.parametrize("same_pair", [("input", "retry"), ("input", "rejected"), ("retry", "rejected")])
+def test_queue_paths_reject_shared_ownership_paths(tmp_path, same_pair):
+    shared = tmp_path / "queue.json"
+    values = {
+        "input": str(tmp_path / "input.json"),
+        "retry": str(tmp_path / "retry.json"),
+        "rejected": str(tmp_path / "rejected.json"),
+    }
+    values[same_pair[0]] = str(shared)
+    values[same_pair[1]] = str(shared)
+    with pytest.raises(ValueError, match="must be different paths"):
+        publisher.get_queue_paths(
+            {
+                "LMN_INPUT_FILE": values["input"],
+                "LMN_RETRY_FILE": values["retry"],
+                "LMN_REJECTED_FILE": values["rejected"],
+            }
+        )
+
+
+def test_queue_paths_reject_empty_and_directory(tmp_path):
+    with pytest.raises(ValueError, match="must not be empty"):
+        publisher.get_queue_paths({"LMN_REJECTED_FILE": "   "})
+    with pytest.raises(ValueError, match="must point to a file"):
+        publisher.get_queue_paths({"LMN_INPUT_FILE": str(tmp_path)})
+
+
+def test_validate_item_and_merge_queue_contracts():
+    assert publisher.validate_item(valid_item(title_en="")) is None
+    assert publisher.validate_item(valid_item(source_url="javascript:alert(1)")) is None
+    assert publisher.validate_item(["not", "object"]) is None
+
+    first = valid_item(source_url="https://example.com/a")
+    duplicate = valid_item(source_url="https://example.com/a", title_en="newer")
+    second = valid_item(source_url="https://example.com/b")
+    invalid = {"bad": "payload"}
+    assert publisher.merge_queues([first, invalid], [duplicate, second]) == [first, invalid, second]
+
+
+def test_publish_item_uses_source_url_conflict_contract_and_duplicate_noop():
+    client = FakeClient([[{"id": 1}], []])
+    assert publisher.publish_item(client, valid_item()) == "published"
+    assert client.query.kwargs == {"on_conflict": "source_url", "ignore_duplicates": True}
+    assert publisher.publish_item(client, valid_item()) == "duplicate"
+
+
+def test_publish_with_retry_keeps_existing_in_process_bound():
     request = httpx.Request("POST", "https://example.supabase.co")
-    client = FakeClient([httpx.ConnectError("offline", request=request) for _ in range(3)])
+    client = FakeClient([httpx.ReadTimeout("timeout", request=request), [{"id": 1}]])
+    sleeps = []
+    assert publisher.publish_with_retry(client, valid_item(), sleep_fn=sleeps.append) == "published"
+    assert sleeps == [publisher.RETRY_BACKOFF_SECONDS]
+
+    failed = FakeClient(transient_failures())
+    assert publisher.publish_with_retry(failed, valid_item(), sleep_fn=lambda _: None)[0] == "retryable_failure"
+    assert len(failed.query.items) == publisher.MAX_ATTEMPTS
+
+
+def test_process_batch_handles_independent_success_retry_permanent_and_invalid():
+    retry_item = valid_item(source_url="https://example.com/retry")
+    permanent = valid_item(source_url="https://example.com/permanent")
+    client = FakeClient(
+        [
+            [{"id": 1}],
+            *transient_failures(),
+            RuntimeError("schema mismatch"),
+        ]
+    )
+    counts, retry_queue, rejected = publisher.process_batch(
+        client,
+        [valid_item(source_url="https://example.com/new"), retry_item, permanent, {"bad": "payload"}],
+        sleep_fn=lambda _: None,
+        now_fn=lambda: 1000.0,
+    )
+    assert counts["published"] == 1
+    assert counts["retryable_failure"] == 1
+    assert counts["permanent_failure"] == 1
+    assert counts["invalid"] == 1
+    assert retry_queue[0]["source_url"] == retry_item["source_url"]
+    metadata = retry_queue[0][publisher.RETRY_METADATA_KEY]
+    assert metadata == {"cycles": 1, "first_failed_at": 1000.0, "next_attempt_at": 1300.0}
+    assert rejected == [permanent, {"bad": "payload"}]
+
+
+def test_retry_metadata_is_fail_closed_when_corrupt():
+    raw = {**valid_item(), publisher.RETRY_METADATA_KEY: {"cycles": "forever"}}
+    counts, retry_queue, rejected = publisher.process_batch(
+        FakeClient([]), [raw], now_fn=lambda: 1000.0
+    )
+    assert counts["invalid"] == 1
+    assert retry_queue == []
+    assert rejected == [valid_item()]
+
+
+def test_deferred_retry_does_not_call_provider_or_block_other_item():
+    retained = publisher.with_retry_metadata(
+        valid_item(source_url="https://example.com/a"),
+        {"cycles": 2, "first_failed_at": 100.0, "next_attempt_at": 2000.0},
+    )
+    fresh = valid_item(source_url="https://example.com/b")
+    client = FakeClient([[{"id": 2}]])
+    counts, retry_queue, rejected = publisher.process_batch(
+        client, [retained, fresh], now_fn=lambda: 1000.0
+    )
+    assert counts["deferred"] == 1
+    assert counts["published"] == 1
+    assert [item["source_url"] for item in client.query.items] == [fresh["source_url"]]
+    assert retry_queue == [retained]
+    assert rejected == []
+
+
+def test_retry_lifetime_exhaustion_is_durable_and_quarantined():
+    item = publisher.with_retry_metadata(
+        valid_item(source_url="https://example.com/a"),
+        {
+            "cycles": publisher.MAX_RETRY_CYCLES - 1,
+            "first_failed_at": 100.0,
+            "next_attempt_at": 0.0,
+        },
+    )
+    counts, retry_queue, rejected = publisher.process_batch(
+        FakeClient(transient_failures()), [item], sleep_fn=lambda _: None, now_fn=lambda: 1000.0
+    )
+    assert counts["retry_exhausted"] == 1
+    assert retry_queue == []
+    assert rejected[0][publisher.RETRY_METADATA_KEY]["cycles"] == publisher.MAX_RETRY_CYCLES
+
+
+def test_main_retains_transient_work_but_returns_success_for_orchestrator_liveness(monkeypatch, tmp_path):
+    input_file, retry_file, rejected_file = configure_paths(monkeypatch, tmp_path)
+    item = valid_item(source_url="https://example.com/retry")
+    input_file.write_text(json.dumps([item]), encoding="utf-8")
+    client = FakeClient(transient_failures())
     monkeypatch.setattr(publisher, "create_client", lambda *_: client)
 
-    assert publisher.main() == 1
+    # Retained transient work is durable and paced. Exit zero is intentional: the
+    # launcher may continue to Harvester instead of starving independent collection.
+    assert publisher.main() == 0
     assert not input_file.exists()
-    assert json.loads(retry_file.read_text(encoding="utf-8")) == [failed_item]
-    assert json.loads(rejected_file.read_text(encoding="utf-8")) == [{"bad": "payload"}]
+    retained = json.loads(retry_file.read_text(encoding="utf-8"))
+    assert retained[0]["source_url"] == item["source_url"]
+    assert retained[0][publisher.RETRY_METADATA_KEY]["cycles"] == 1
+    assert not rejected_file.exists()
 
 
-def test_main_quarantines_permanent_failure_and_does_not_retry_it_next_run(monkeypatch, tmp_path):
+def test_multi_run_scheduler_liveness_retained_a_cannot_starve_new_b(monkeypatch, tmp_path):
     input_file, retry_file, rejected_file = configure_paths(monkeypatch, tmp_path)
-    permanent = valid_item(source_url="https://example.com/permanent", title_en="Permanent")
-    input_file.write_text(json.dumps([permanent]), encoding="utf-8")
+    item_a = valid_item(source_url="https://example.com/a", title_en="A")
+    item_b = valid_item(source_url="https://example.com/b", title_en="B")
 
-    first_client = FakeClient([RuntimeError("schema mismatch")])
+    # Scheduler run N: A fails all local attempts and is durably retained with pacing.
+    input_file.write_text(json.dumps([item_a]), encoding="utf-8")
+    first_client = FakeClient(transient_failures())
     monkeypatch.setattr(publisher, "create_client", lambda *_: first_client)
+    assert publisher.main() == 0
+    retained_a = json.loads(retry_file.read_text(encoding="utf-8"))[0]
+    assert retained_a[publisher.RETRY_METADATA_KEY]["cycles"] == 1
+
+    # Scheduler run N+1 preflight: A is not due. The zero exit explicitly allows the
+    # launcher to execute Harvester; no provider attempt is spent on A.
+    preflight_client = FakeClient([])
+    monkeypatch.setattr(publisher, "create_client", lambda *_: preflight_client)
+    assert publisher.main() == 0
+    assert preflight_client.query.items == []
+
+    # Harvester work B is now represented as a new Publisher inbound/spool claim while
+    # A remains retained. Publisher processes B independently; A remains durable.
+    input_file.parent.mkdir(parents=True, exist_ok=True)
+    publisher.atomic_write_json(input_file, [item_b])
+    b_client = FakeClient([[{"id": 2}]])
+    monkeypatch.setattr(publisher, "create_client", lambda *_: b_client)
+    assert publisher.main() == 0
+    assert [item["source_url"] for item in b_client.query.items] == [item_b["source_url"]]
+    assert json.loads(retry_file.read_text(encoding="utf-8"))[0]["source_url"] == item_a["source_url"]
+    assert not rejected_file.exists()
+
+
+def test_main_quarantines_permanent_failure_and_signals_operator(monkeypatch, tmp_path):
+    input_file, retry_file, rejected_file = configure_paths(monkeypatch, tmp_path)
+    permanent = valid_item(source_url="https://example.com/permanent")
+    input_file.write_text(json.dumps([permanent]), encoding="utf-8")
+    monkeypatch.setattr(publisher, "create_client", lambda *_: FakeClient([RuntimeError("schema mismatch")]))
 
     assert publisher.main() == 1
     assert not input_file.exists()
     assert not retry_file.exists()
     assert json.loads(rejected_file.read_text(encoding="utf-8")) == [permanent]
-    assert [item["source_url"] for item in first_client.query.items] == [permanent["source_url"]]
 
-    # Quarantine is not an active input queue. A later no-work run succeeds and does
-    # not create a client or reattempt the permanent failure.
     monkeypatch.setattr(
         publisher,
         "create_client",
         lambda *_: pytest.fail("quarantined item must not be reprocessed"),
     )
     assert publisher.main() == 0
-    assert json.loads(rejected_file.read_text(encoding="utf-8")) == [permanent]
 
 
-def test_main_invalid_payload_is_quarantined_and_signaled_once(monkeypatch, tmp_path):
+def test_main_invalid_payload_is_quarantined_once(monkeypatch, tmp_path):
     input_file, retry_file, rejected_file = configure_paths(monkeypatch, tmp_path)
     input_file.write_text(json.dumps([{"bad": "payload"}]), encoding="utf-8")
     monkeypatch.setattr(publisher, "create_client", lambda *_: FakeClient([]))
-
     assert publisher.main() == 1
-    assert not input_file.exists()
-    assert not retry_file.exists()
     assert json.loads(rejected_file.read_text(encoding="utf-8")) == [{"bad": "payload"}]
-
     assert publisher.main() == 0
 
 
-def test_main_custom_path_removes_successfully_published_queues(monkeypatch, tmp_path):
+def test_main_success_removes_owned_queues(monkeypatch, tmp_path):
     input_file, retry_file, rejected_file = configure_paths(monkeypatch, tmp_path)
     input_file.write_text(json.dumps([valid_item()]), encoding="utf-8")
     monkeypatch.setattr(publisher, "create_client", lambda *_: FakeClient([[{"id": 1}]]))
-
     assert publisher.main() == 0
-    assert not input_file.exists()
-    assert not retry_file.exists()
-    assert not rejected_file.exists()
-
-
-def test_cross_run_partial_failure_survives_next_inbound_batch(monkeypatch, tmp_path):
-    input_file, retry_file, rejected_file = configure_paths(monkeypatch, tmp_path)
-    item_a = valid_item(source_url="https://example.com/a", title_en="A")
-    item_b = valid_item(source_url="https://example.com/b", title_en="B")
-    input_file.write_text(json.dumps([item_a]), encoding="utf-8")
-
-    request = httpx.Request("POST", "https://example.supabase.co")
-    first_client = FakeClient([httpx.ConnectError("offline", request=request) for _ in range(3)])
-    monkeypatch.setattr(publisher, "create_client", lambda *_: first_client)
-    assert publisher.main() == 1
-    assert json.loads(retry_file.read_text(encoding="utf-8")) == [item_a]
-    assert not input_file.exists()
-
-    # Run N+1 delivers a new inbound batch without touching Publisher-owned retry state.
-    input_file.parent.mkdir(parents=True, exist_ok=True)
-    publisher.atomic_write_json(input_file, [item_b, item_a])
-    second_client = FakeClient([[{"id": 1}], [{"id": 2}]])
-    monkeypatch.setattr(publisher, "create_client", lambda *_: second_client)
-
-    assert publisher.main() == 0
-    assert [item["source_url"] for item in second_client.query.items] == [
-        "https://example.com/a",
-        "https://example.com/b",
-    ]
     assert not input_file.exists()
     assert not retry_file.exists()
     assert not rejected_file.exists()
