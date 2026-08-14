@@ -205,7 +205,7 @@ def test_same_batch_replay_is_idempotent_at_spool_and_database(monkeypatch, tmp_
 
 
 def test_new_batch_survives_while_previous_batch_transitions_to_retry(monkeypatch, tmp_path):
-    """Forced Test G: B arriving while A retries cannot be overwritten or discarded."""
+    """Forced Test G: retained A stays durable while fresh B remains independently processable."""
     spool_root = tmp_path / "spool"
     batch_a = "batch-" + "f" * 32
     batch_b = "batch-" + "0" * 32
@@ -257,12 +257,19 @@ def test_new_batch_survives_while_previous_batch_transitions_to_retry(monkeypatc
     allow_failure.set()
     thread.join(timeout=5)
     assert result["exit"] == 1
-    assert json.loads(retry.read_text(encoding="utf-8")) == [item_a]
+
+    retained = json.loads(retry.read_text(encoding="utf-8"))
+    assert len(retained) == 1
+    assert publisher.validate_item(retained[0]) == item_a
+    retry_state = retained[0][publisher.RETRY_METADATA_KEY]
+    assert retry_state["cycles"] == 1
+    assert retry_state["next_attempt_at"] > retry_state["first_failed_at"]
     assert inbox_b.exists()
 
-    # Next processing pass composes retained retry A with queued B; neither disappears.
+    # Immediate scheduler-style processing must defer A without consuming provider
+    # budget while still publishing fresh B. A remains durable for its next due cycle.
     claimed_b = spool.claim_next_batch(spool_root)
-    client_b = FakeClient([[{"id": 1}], [{"id": 2}]])
+    client_b = FakeClient([[{"id": 2}]])
     monkeypatch.setattr(publisher, "create_client", lambda *_: client_b)
     assert publisher.run_locked_publisher(
         claimed_b,
@@ -270,12 +277,14 @@ def test_new_batch_survives_while_previous_batch_transitions_to_retry(monkeypatc
         rejected,
         "https://example.supabase.co",
         "test-key",
+        allow_retained_retry_success=True,
     ) == 0
     assert [entry["source_url"] for entry in client_b.query.items] == [
-        "https://example.com/a",
         "https://example.com/b",
     ]
-    assert not retry.exists()
+    retained_after_b = json.loads(retry.read_text(encoding="utf-8"))
+    assert retained_after_b == retained
+    assert not claimed_b.exists()
 
 
 def test_control_case_proves_legacy_mutable_inbound_can_delete_unread_b(tmp_path):
