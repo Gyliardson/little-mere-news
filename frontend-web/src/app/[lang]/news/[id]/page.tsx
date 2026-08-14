@@ -7,7 +7,7 @@ import Link from "next/link";
 export const revalidate = 3600;
 
 async function getNews(id: string) {
-  return supabase.from("news").select("*").eq("id", id).single();
+  return supabase.from("news").select("*").eq("id", id).maybeSingle();
 }
 
 export async function generateMetadata({ params }: { params: Promise<{ lang: string; id: string }> }): Promise<Metadata> {
@@ -15,7 +15,14 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
   const isPt = lang === "pt";
   const { data: news, error } = await getNews(id);
 
-  if (error || !news) return {};
+  if (error) {
+    return {
+      title: isPt ? "Artigo temporariamente indisponível" : "Article temporarily unavailable",
+      robots: { index: false, follow: false },
+    };
+  }
+
+  if (!news) return {};
 
   const title = isPt ? news.title_pt : news.title_en;
   const description = isPt ? news.summary_pt : news.summary_en;
@@ -46,7 +53,14 @@ export default async function NewsDetail({ params }: { params: Promise<{ lang: s
   const isPt = lang === "pt";
   const { data: news, error } = await getNews(id);
 
-  if (error || !news) notFound();
+  if (error) {
+    // Provider details may contain implementation/internal information. The nested
+    // route error boundary presents a generic retryable state instead of converting
+    // infrastructure failure into a misleading content 404.
+    throw new Error("Article data provider unavailable");
+  }
+
+  if (!news) notFound();
 
   const safeSourceUrl = safeHttpUrl(news.source_url);
 
