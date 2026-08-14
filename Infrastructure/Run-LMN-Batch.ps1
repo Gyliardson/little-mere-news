@@ -40,6 +40,25 @@ function Invoke-CheckedExternal {
     }
 }
 
+function Wait-LmnVmNetwork {
+    param(
+        [string]$IpAddress,
+        [int]$TimeoutSeconds,
+        [string[]]$VmNames
+    )
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (Test-Connection -ComputerName $IpAddress -Count 1 -Quiet) {
+            Write-Host "      [+] VM $IpAddress is online!" -ForegroundColor Green
+            return
+        }
+        Start-Sleep -Seconds 2
+    } while ((Get-Date) -lt $deadline)
+
+    Fail-LmnBatch -Message "VM $IpAddress did not become reachable within $TimeoutSeconds seconds" -VmNames $VmNames
+}
+
 $lockPath = Join-Path $PSScriptRoot "..\lmn-batch.lock"
 try {
     $batchLock = [System.IO.File]::Open(
@@ -64,6 +83,16 @@ try {
         Write-Host "[ERROR] Trusted SSH known_hosts file was not found: $KnownHostsFile" -ForegroundColor Red
         Write-Host "Verify each VM host-key fingerprint through a trusted channel and enroll it before running the batch." -ForegroundColor Yellow
         exit 1
+    }
+
+    $VmReadyTimeoutSeconds = 120
+    if ($env:LMN_VM_READY_TIMEOUT_SECONDS) {
+        $parsedVmReadyTimeout = 0
+        if (-not [int]::TryParse($env:LMN_VM_READY_TIMEOUT_SECONDS, [ref]$parsedVmReadyTimeout) -or $parsedVmReadyTimeout -lt 5 -or $parsedVmReadyTimeout -gt 600) {
+            Write-Host "[ERROR] LMN_VM_READY_TIMEOUT_SECONDS must be an integer from 5 to 600." -ForegroundColor Red
+            exit 1
+        }
+        $VmReadyTimeoutSeconds = $parsedVmReadyTimeout
     }
 
     $SshOptions = @(
@@ -95,16 +124,10 @@ try {
     Write-Host "[1/6] Starting Virtual Machines ($VMs)..." -ForegroundColor Yellow
     Start-VM -Name $VMs -ErrorAction SilentlyContinue
 
-    Write-Host "      Waiting for boot and network connection..." -ForegroundColor DarkGray
+    Write-Host "      Waiting for boot and network connection (timeout ${VmReadyTimeoutSeconds}s per VM)..." -ForegroundColor DarkGray
     $IPs = "10.0.100.10", "10.0.100.20", "10.0.100.30"
     foreach ($ip in $IPs) {
-        while ($true) {
-            if (Test-Connection -ComputerName $ip -Count 1 -Quiet) {
-                Write-Host "      [+] VM $ip is online!" -ForegroundColor Green
-                break
-            }
-            Start-Sleep -Seconds 2
-        }
+        Wait-LmnVmNetwork -IpAddress $ip -TimeoutSeconds $VmReadyTimeoutSeconds -VmNames $VMs
     }
     Write-Host "      Waiting for services (SSH, Ollama) to initialize (15s)..." -ForegroundColor DarkGray
     Start-Sleep -Seconds 15
