@@ -46,6 +46,8 @@ class Session:
 
     def get(self, url, timeout, allow_redirects):
         self.calls.append((url, timeout, allow_redirects))
+        if not self.responses:
+            pytest.fail(f"unexpected network contact: {url}")
         return self.responses.pop(0)
 
 
@@ -74,7 +76,7 @@ def test_public_feed_succeeds_without_automatic_redirects():
     ],
 )
 def test_non_public_initial_target_is_never_contacted(monkeypatch, target, address):
-    session = Session([pytest.fail("forbidden target must never be contacted")])
+    session = Session([])
     monkeypatch.setattr(harvester.time, "sleep", lambda _: None)
 
     with pytest.raises(RuntimeError, match="forbidden non-public"):
@@ -121,7 +123,7 @@ def test_redirect_to_non_public_target_is_rejected_before_contact(
 
 
 def test_hostname_resolving_private_is_rejected_without_contact(monkeypatch):
-    session = Session([pytest.fail("private resolution must be blocked before contact")])
+    session = Session([])
     monkeypatch.setattr(harvester.time, "sleep", lambda _: None)
 
     with pytest.raises(RuntimeError, match="forbidden non-public"):
