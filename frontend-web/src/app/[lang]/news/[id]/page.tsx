@@ -1,19 +1,10 @@
 import type { Metadata } from "next";
 import { supabase } from "@/lib/supabase/client";
+import { safeHttpUrl } from "@/lib/http-url";
 import { notFound } from "next/navigation";
 import Link from "next/link";
 
 export const revalidate = 3600;
-
-function isSafeHttpUrl(value: unknown): value is string {
-  if (typeof value !== "string") return false;
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
 
 async function getNews(id: string) {
   return supabase.from("news").select("*").eq("id", id).single();
@@ -57,7 +48,7 @@ export default async function NewsDetail({ params }: { params: Promise<{ lang: s
 
   if (error || !news) notFound();
 
-  const safeSourceUrl = isSafeHttpUrl(news.source_url) ? news.source_url : null;
+  const safeSourceUrl = safeHttpUrl(news.source_url);
 
   return (
     <article className="max-w-3xl mx-auto py-8">
