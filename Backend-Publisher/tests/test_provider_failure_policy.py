@@ -61,6 +61,17 @@ def http_status_error(status):
     return httpx.HTTPStatusError("provider response failed", request=request, response=response)
 
 
+def api_error(code, message="provider body message must not drive classification"):
+    return APIError(
+        {
+            "code": code,
+            "details": None,
+            "hint": None,
+            "message": message,
+        }
+    )
+
+
 def test_structured_retryable_http_statuses_are_explicit_and_bounded():
     for status in (408, 429, 500, 502, 503, 504):
         assert policy.is_retryable_publish_exception(http_status_error(status)) is True
@@ -69,31 +80,43 @@ def test_structured_retryable_http_statuses_are_explicit_and_bounded():
         assert policy.is_retryable_publish_exception(http_status_error(status)) is False
 
 
-def test_postgrest_numeric_http_code_is_classified_without_message_parsing():
-    transient = APIError(
-        {
-            "code": 503,
-            "details": None,
-            "hint": None,
-            "message": "arbitrary provider text that policy must not parse",
-        }
-    )
+def test_postgrest_apierror_preserves_body_code_not_http_status():
+    transient = api_error("PGRST003", "Timed out acquiring connection from connection pool.")
 
-    assert policy.provider_http_status(transient) == 503
+    # This is the actual valid-JSON shape raised by postgrest-py: the body code is
+    # available on APIError, while the original HTTP 504 is not exposed here.
+    assert transient.code == "PGRST003"
+    assert policy.provider_http_status(transient) is None
+    assert policy.provider_error_code(transient) == "PGRST003"
     assert policy.is_retryable_publish_exception(transient) is True
 
 
+def test_postgrest_pool_timeout_retries_and_can_recover():
+    client = FakeClient([api_error("PGRST003"), [{"id": 1}]])
+    sleeps = []
+
+    result = publisher.publish_with_retry(client, valid_item(), sleep_fn=sleeps.append)
+
+    assert result == "published"
+    assert sleeps == [publisher.RETRY_BACKOFF_SECONDS]
+
+
+def test_other_postgrest_5xx_body_codes_remain_fail_closed_without_explicit_policy():
+    # PGRST000 maps to 503 but can mean an incorrect db-uri/configuration. Do not
+    # infer retryability from a generic 5xx mapping when postgrest-py dropped the
+    # HTTP status and only retained the provider body code.
+    configuration_error = api_error("PGRST000")
+    internal_error = api_error("PGRSTX00")
+
+    assert policy.is_retryable_publish_exception(configuration_error) is False
+    assert policy.is_retryable_publish_exception(internal_error) is False
+
+
 def test_postgrest_sqlstate_auth_failure_is_not_mistaken_for_http_status():
-    rls_error = APIError(
-        {
-            "code": "42501",
-            "details": None,
-            "hint": None,
-            "message": "new row violates row-level security policy",
-        }
-    )
+    rls_error = api_error("42501", "new row violates row-level security policy")
 
     assert policy.provider_http_status(rls_error) is None
+    assert policy.provider_error_code(rls_error) == "42501"
     assert policy.is_retryable_publish_exception(rls_error) is False
 
 
@@ -118,15 +141,7 @@ def test_publish_with_retry_retains_server_failure_after_max_attempts():
 
 
 def test_publish_with_retry_quarantines_structured_auth_failure_immediately():
-    auth_error = APIError(
-        {
-            "code": "42501",
-            "details": None,
-            "hint": None,
-            "message": "authorization denied",
-        }
-    )
-    client = FakeClient([auth_error])
+    client = FakeClient([api_error("42501", "authorization denied")])
     sleeps = []
 
     result = publisher.publish_with_retry(client, valid_item(), sleep_fn=sleeps.append)
