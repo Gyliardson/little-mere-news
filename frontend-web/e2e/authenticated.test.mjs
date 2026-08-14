@@ -3,33 +3,41 @@ import { after, before, test } from "node:test";
 import { chromium } from "playwright";
 
 const baseURL = process.env.E2E_BASE_URL ?? "http://127.0.0.1:3000";
+const fixtureURL = `http://127.0.0.1:${process.env.FAKE_SUPABASE_PORT ?? 54321}`;
 let browser;
 let adminStorageState;
 
-async function signIn(page) {
-  await page.goto(`${baseURL}/en/ci-admin/login`, { waitUntil: "domcontentloaded" });
-  await page.getByLabel("Corporate Email").fill("admin@example.test");
-  await page.getByLabel("Password").fill("admin-password");
-  await page.getByRole("button", { name: "Authenticate" }).click();
+async function resetFixture() {
+  const response = await fetch(`${fixtureURL}/__test__/reset`, { method: "POST" });
+  assert.equal(response.status, 200);
+}
 
-  // Next.js performs a client-side router.replace after the auth cookie is
-  // persisted. Synchronize on the authorized UI boundary rather than a full
-  // document `load` event, which is not a stable lifecycle signal for a
-  // client-side transition.
+async function fixtureState() {
+  const response = await fetch(`${fixtureURL}/__test__/state`);
+  assert.equal(response.status, 200);
+  return response.json();
+}
+
+async function signIn(page, email = "admin@example.test", password = "admin-password") {
+  await page.goto(`${baseURL}/en/ci-admin/login`, { waitUntil: "domcontentloaded" });
+  await page.getByLabel("Corporate Email").fill(email);
+  await page.getByLabel("Password").fill(password);
+  await page.getByRole("button", { name: "Authenticate" }).click();
+}
+
+async function signInAdmin(page) {
+  await signIn(page);
   await page.getByRole("heading", { name: "Overview" }).waitFor();
   assert.equal(page.url(), `${baseURL}/en/ci-admin`);
 }
 
 before(async () => {
   browser = await chromium.launch({ headless: true });
+  await resetFixture();
 
-  // Prove the real browser sign-in once, then reuse only the resulting browser
-  // storage for independent CMS scenarios. Repeating the same auth transition
-  // for every test adds lifecycle flake without increasing authorization
-  // coverage.
   const bootstrap = await browser.newContext({ viewport: { width: 1280, height: 800 } });
   const page = await bootstrap.newPage();
-  await signIn(page);
+  await signInAdmin(page);
   adminStorageState = await bootstrap.storageState();
   await bootstrap.close();
 });
@@ -44,6 +52,27 @@ async function newAdminContext() {
     viewport: { width: 1280, height: 800 },
     storageState: adminStorageState,
   });
+}
+
+function replayHeaders(request) {
+  const headers = { ...request.headers() };
+  for (const name of [
+    "cookie",
+    "content-length",
+    "host",
+    "connection",
+    "sec-fetch-dest",
+    "sec-fetch-mode",
+    "sec-fetch-site",
+  ]) {
+    delete headers[name];
+  }
+  return headers;
+}
+
+async function viewerCookieHeader(context) {
+  const cookies = await context.cookies(baseURL);
+  return cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
 }
 
 test("authorized administrator reaches the real dashboard boundary", async () => {
@@ -98,6 +127,92 @@ test("CMS edit dialog exposes labels and preserves field focus", async () => {
   await page.keyboard.type("X");
   assert.equal(await title.evaluate((node) => document.activeElement === node), true);
   assert.match(await title.inputValue(), /^X|X$/);
+
+  await context.close();
+});
+
+test("admin update crosses Server Action and ordinary user cannot replay the mutation", async () => {
+  await resetFixture();
+  const adminContext = await newAdminContext();
+  const adminPage = await adminContext.newPage();
+  await adminPage.goto(`${baseURL}/en/ci-admin/news`, { waitUntil: "domcontentloaded" });
+
+  await adminPage.getByRole("button", { name: /Edit: Deterministic AI fixture/ }).click();
+  const dialog = adminPage.getByRole("dialog", { name: "Edit News" });
+  const title = dialog.getByLabel("Title (EN)");
+  await title.fill("Updated through Server Action");
+
+  const actionRequestPromise = adminPage.waitForRequest(
+    (request) => request.method() === "POST" && Boolean(request.headers()["next-action"]),
+  );
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  const actionRequest = await actionRequestPromise;
+  await adminPage.getByRole("status").filter({ hasText: "News updated successfully." }).waitFor();
+
+  const stateAfterAdmin = await fixtureState();
+  assert.deepEqual(
+    stateAfterAdmin.mutationEvents.map(({ method, id }) => ({ method, id })),
+    [{ method: "PATCH", id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }],
+  );
+  assert.equal(stateAfterAdmin.news[0].title_en, "Updated through Server Action");
+
+  const captured = {
+    url: actionRequest.url(),
+    headers: replayHeaders(actionRequest),
+    body: actionRequest.postData(),
+  };
+  assert.ok(captured.headers["next-action"], "real Next.js Server Action header must be captured");
+  assert.ok(captured.body, "real Next.js Server Action body must be captured");
+  await adminContext.close();
+
+  const viewerContext = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const viewerPage = await viewerContext.newPage();
+  await signIn(viewerPage, "viewer@example.test", "viewer-password");
+  await viewerPage.getByRole("heading", { name: "Restricted Access" }).waitFor();
+
+  const headers = {
+    ...captured.headers,
+    cookie: await viewerCookieHeader(viewerContext),
+    origin: baseURL,
+    referer: `${baseURL}/en/ci-admin/news`,
+  };
+  const replay = await fetch(captured.url, {
+    method: "POST",
+    headers,
+    body: captured.body,
+  });
+  const replayBody = await replay.text();
+  assert.equal(replay.status, 200);
+  assert.match(replayBody, /Forbidden/);
+
+  const stateAfterViewer = await fixtureState();
+  assert.equal(stateAfterViewer.mutationEvents.length, 1);
+  assert.equal(stateAfterViewer.news[0].title_en, "Updated through Server Action");
+  await viewerContext.close();
+});
+
+test("authorized administrator can delete through the real CMS mutation boundary", async () => {
+  await resetFixture();
+  const context = await newAdminContext();
+  const page = await context.newPage();
+  await page.goto(`${baseURL}/en/ci-admin/news`, { waitUntil: "domcontentloaded" });
+
+  await page
+    .getByRole("button", { name: /Delete: Deterministic development fixture/ })
+    .click();
+  const dialog = page.getByRole("dialog", { name: "Confirm Deletion" });
+  await dialog.getByRole("button", { name: "Yes, Delete" }).click();
+  await page.getByRole("status").filter({ hasText: "News deleted successfully." }).waitFor();
+
+  const state = await fixtureState();
+  assert.deepEqual(
+    state.mutationEvents.map(({ method, id }) => ({ method, id })),
+    [{ method: "DELETE", id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }],
+  );
+  assert.equal(
+    state.news.some((item) => item.id === "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+    false,
+  );
 
   await context.close();
 });
