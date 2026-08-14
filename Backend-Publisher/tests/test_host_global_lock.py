@@ -29,16 +29,11 @@ def wait_for(path, process, timeout=5):
             stdout, stderr = process.communicate()
             raise AssertionError(f"lock holder exited before barrier: {stdout}\n{stderr}")
         time.sleep(0.05)
-    stdout = stderr = ""
-    if process.poll() is not None:
-        stdout, stderr = process.communicate()
-    raise AssertionError(
-        f"timed out waiting for lock-holder barrier; rc={process.poll()} stdout={stdout} stderr={stderr}"
-    )
+    raise AssertionError("timed out waiting for lock-holder acquisition barrier")
 
 
 def test_two_launcher_processes_from_different_checkouts_share_one_host_lock(tmp_path):
-    """Forced Test C: two real pwsh launchers cannot overlap on the same VM resources."""
+    """Forced Test C: one holder blocks another checkout; process death releases ownership."""
     pwsh = shutil.which("pwsh")
     assert pwsh is not None, "GitHub runner must provide pwsh for Hyper-V contract tests"
 
@@ -46,11 +41,11 @@ def test_two_launcher_processes_from_different_checkouts_share_one_host_lock(tmp
     checkout_b = tmp_path / "clone-b"
     lock_root = tmp_path / "host-global-lock-root"
     ready = tmp_path / "holder-ready"
-    release = tmp_path / "holder-release"
     path_a_file = tmp_path / "path-a.txt"
     path_b_file = tmp_path / "path-b.txt"
     holder_file = tmp_path / "holder.ps1"
     contender_file = tmp_path / "contender.ps1"
+    recovery_file = tmp_path / "recovery.ps1"
     checkout_a.mkdir()
     checkout_b.mkdir()
 
@@ -66,11 +61,7 @@ Set-Content -LiteralPath {ps_quote(path_a_file)} -Value $path -NoNewline
 $lock = Enter-LmnHostLock -ResourceIds $resources -LockRootOverride $root
 try {{
     New-Item -ItemType File -Path {ps_quote(ready)} -Force | Out-Null
-    $deadline = (Get-Date).AddSeconds(10)
-    while (-not (Test-Path -LiteralPath {ps_quote(release)})) {{
-        if ((Get-Date) -ge $deadline) {{ throw 'holder release barrier timed out' }}
-        Start-Sleep -Milliseconds 50
-    }}
+    Start-Sleep -Seconds 30
 }} finally {{
     $lock.Dispose()
 }}
@@ -95,6 +86,15 @@ try {{
 """,
         encoding="utf-8",
     )
+    recovery_file.write_text(
+        f"""$ErrorActionPreference = 'Stop'
+. {ps_quote(HELPER)}
+$resources = @({resources})
+$lock = Enter-LmnHostLock -ResourceIds $resources -LockRootOverride {ps_quote(lock_root)}
+try {{ exit 0 }} finally {{ $lock.Dispose() }}
+""",
+        encoding="utf-8",
+    )
 
     holder = subprocess.Popen(
         [pwsh, "-NoProfile", "-NonInteractive", "-File", str(holder_file)],
@@ -115,9 +115,23 @@ try {{
         assert path_a_file.read_text(encoding="utf-8") == path_b_file.read_text(encoding="utf-8")
         assert "batch-" in path_a_file.read_text(encoding="utf-8")
     finally:
-        release.write_text("release", encoding="utf-8")
-        stdout, stderr = holder.communicate(timeout=10)
-        assert holder.returncode == 0, stderr or stdout
+        # A killed launcher is an explicit crash interleaving. OS handle cleanup must
+        # release the global file lock rather than leaving the resource permanently wedged.
+        holder.terminate()
+        try:
+            holder.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            holder.kill()
+            holder.communicate(timeout=5)
+
+    recovery = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-File", str(recovery_file)],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert recovery.returncode == 0, recovery.stderr or recovery.stdout
 
 
 def test_host_lock_default_is_not_repository_relative():
