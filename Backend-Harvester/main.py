@@ -1,11 +1,13 @@
 import calendar
 import fcntl
+import ipaddress
 import json
 import os
+import socket
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import feedparser
 import requests
@@ -24,6 +26,8 @@ MAX_PER_FEED = 2
 SOURCE_TIMEOUT_SECONDS = 15
 AI_TIMEOUT_SECONDS = 60
 MAX_RETRIES = 2
+MAX_REDIRECTS = 5
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 AI_REQUIRED_FIELDS = ("title_en", "title_pt", "summary_en", "summary_pt")
 
 
@@ -53,6 +57,58 @@ def valid_source_url(value):
         return False
     parsed = urlparse(value.strip())
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _resolved_addresses(hostname, port, resolver=socket.getaddrinfo):
+    """Resolve a hostname to concrete IP addresses for outbound policy checks."""
+    try:
+        literal = ipaddress.ip_address(hostname)
+        return {literal}
+    except ValueError:
+        pass
+
+    try:
+        results = resolver(hostname, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(f"Could not resolve feed host {hostname!r}: {exc}") from exc
+
+    addresses = set()
+    for result in results:
+        sockaddr = result[4]
+        if not sockaddr:
+            continue
+        try:
+            addresses.add(ipaddress.ip_address(sockaddr[0]))
+        except ValueError as exc:
+            raise ValueError(f"Resolver returned invalid address for {hostname!r}") from exc
+    if not addresses:
+        raise ValueError(f"Feed host {hostname!r} resolved to no usable addresses")
+    return addresses
+
+
+def validate_feed_target(value, resolver=socket.getaddrinfo):
+    """Require an external HTTP(S) feed target resolving only to public IP space."""
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid feed URL: {value!r}")
+    normalized = value.strip()
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"Invalid feed URL: {value!r}")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Feed URLs must not contain credentials")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise ValueError(f"Invalid feed URL port: {value!r}") from exc
+
+    addresses = _resolved_addresses(parsed.hostname, port, resolver=resolver)
+    forbidden = sorted(str(address) for address in addresses if not address.is_global)
+    if forbidden:
+        raise ValueError(
+            f"Feed target {parsed.hostname!r} resolves to forbidden non-public address(es): "
+            + ", ".join(forbidden)
+        )
+    return normalized
 
 
 def validate_ai_result(value):
@@ -135,19 +191,44 @@ Article Excerpt:
         return None
 
 
-def fetch_feed(feed_url, session=requests):
-    """Fetch one feed with bounded transport behavior and parse it from bytes."""
-    if not valid_source_url(feed_url):
-        raise ValueError(f"Invalid feed URL: {feed_url!r}")
+def _request_without_redirects(session, url):
+    """Perform one bounded GET without allowing the HTTP client to follow redirects."""
+    return session.get(url, timeout=SOURCE_TIMEOUT_SECONDS, allow_redirects=False)
+
+
+def fetch_feed(feed_url, session=requests, resolver=socket.getaddrinfo):
+    """Fetch one external feed while enforcing network policy on every hop."""
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
         try:
-            response = session.get(feed_url, timeout=SOURCE_TIMEOUT_SECONDS)
-            response.raise_for_status()
-            parsed = feedparser.parse(response.content)
-            if getattr(parsed, "bozo", False):
-                raise ValueError(f"Malformed feed: {getattr(parsed, 'bozo_exception', 'parse error')}")
-            return parsed
+            current_url = validate_feed_target(feed_url, resolver=resolver)
+            for redirect_count in range(MAX_REDIRECTS + 1):
+                # Re-resolve immediately before every request so a hostname that has
+                # changed to private/link-local space is rejected before contact.
+                current_url = validate_feed_target(current_url, resolver=resolver)
+                response = _request_without_redirects(session, current_url)
+                status_code = getattr(response, "status_code", 200)
+
+                if status_code in REDIRECT_STATUSES:
+                    if redirect_count >= MAX_REDIRECTS:
+                        raise ValueError("Feed redirect limit exceeded")
+                    location = getattr(response, "headers", {}).get("Location")
+                    if not location:
+                        raise ValueError("Feed redirect is missing Location header")
+                    current_url = validate_feed_target(
+                        urljoin(current_url, location), resolver=resolver
+                    )
+                    continue
+
+                response.raise_for_status()
+                parsed = feedparser.parse(response.content)
+                if getattr(parsed, "bozo", False):
+                    raise ValueError(
+                        f"Malformed feed: {getattr(parsed, 'bozo_exception', 'parse error')}"
+                    )
+                return parsed
+
+            raise ValueError("Feed redirect limit exceeded")
         except (requests.RequestException, ValueError) as exc:
             last_error = exc
             if attempt < MAX_RETRIES:
@@ -261,7 +342,9 @@ def harvest(categories, provider=None, now=None, feed_loader=fetch_feed):
                     processed_news.append(
                         {
                             "category": category,
-                            "source_name": getattr(getattr(feed, "feed", None), "title", "Unknown Source"),
+                            "source_name": getattr(
+                                getattr(feed, "feed", None), "title", "Unknown Source"
+                            ),
                             "source_url": source_url.strip(),
                             **ai_result,
                         }
