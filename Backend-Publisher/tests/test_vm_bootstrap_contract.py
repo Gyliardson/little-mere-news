@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 from pathlib import Path
 
 
@@ -79,3 +81,35 @@ def test_ollama_bootstrap_is_version_and_integrity_bounded():
     assert 'ollama pull "$OLLAMA_MODEL"' in script
     assert 'ollama cp "$OLLAMA_MODEL" "$OLLAMA_RUNTIME_ALIAS"' in script
     assert "ollama pull llama3\n" not in script
+
+
+def test_bootstrap_scripts_parse_without_executing_external_operations():
+    bash = shutil.which("bash")
+    assert bash is not None
+    for name in ("setup_harvester.sh", "setup_publisher.sh", "setup_ollama.sh"):
+        completed = subprocess.run(
+            [bash, "-n", str(INFRA / name)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert completed.returncode == 0, completed.stderr or completed.stdout
+
+    pwsh = shutil.which("pwsh")
+    assert pwsh is not None, "GitHub runner must provide pwsh for infrastructure contract tests"
+    for name in ("Bootstrap-LMN-Guests.ps1", "Setup-LMN-Infrastructure.ps1"):
+        path = str(INFRA / name).replace("'", "''")
+        command = (
+            "$tokens=$null; $errors=$null; "
+            f"[System.Management.Automation.Language.Parser]::ParseFile('{path}', [ref]$tokens, [ref]$errors) | Out-Null; "
+            "if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_.Message }; exit 1 }"
+        )
+        completed = subprocess.run(
+            [pwsh, "-NoProfile", "-NonInteractive", "-Command", command],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert completed.returncode == 0, completed.stderr or completed.stdout
