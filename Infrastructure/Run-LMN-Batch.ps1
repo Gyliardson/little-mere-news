@@ -116,8 +116,8 @@ try {
     & ssh -o StrictHostKeyChecking=no $PublisherHost $PublisherCommand
     $preflightExit = $LASTEXITCODE
     if ($preflightExit -ne 0) {
-        Write-Host "      [WARN] Retained Publisher work is not drained (exit $preflightExit)." -ForegroundColor Yellow
-        Write-Host "      No new Harvester batch will be created or transferred this run." -ForegroundColor Yellow
+        Write-Host "      [WARN] Publisher reported retained/rejected work or an unsafe queue result (exit $preflightExit)." -ForegroundColor Yellow
+        Write-Host "      No new Harvester batch will be created or transferred this run; inspect Publisher retry/quarantine state." -ForegroundColor Yellow
         Stop-LmnCluster -Names $VMs
         exit $preflightExit
     }
@@ -150,8 +150,8 @@ try {
     & ssh -o StrictHostKeyChecking=no $PublisherHost $PublisherCommand
     $publisherExit = $LASTEXITCODE
     if ($publisherExit -ne 0) {
-        Write-Host "      [WARN] Publisher did not fully drain the queue (exit $publisherExit)." -ForegroundColor Yellow
-        Write-Host "      Inbound/retry state is retained on the Publisher for the next run." -ForegroundColor Yellow
+        Write-Host "      [WARN] Publisher reported retryable/rejected work or an unsafe queue result (exit $publisherExit)." -ForegroundColor Yellow
+        Write-Host "      Durable retry/quarantine state has been preserved; inspect it before treating the batch as successful." -ForegroundColor Yellow
         Stop-LmnCluster -Names $VMs
         exit $publisherExit
     }

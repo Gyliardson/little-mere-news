@@ -73,14 +73,16 @@ Runtime configuration:
 - `SUPABASE_URL` — Supabase project/API URL for the server-side job;
 - `SUPABASE_KEY` — privileged server/job credential; never expose it to browser code, public environment variables or logs;
 - `LMN_INPUT_FILE` — new inbound batch owned by the transfer/orchestration boundary; default `/home/lmnadmin/news_to_publish.inbound.json`;
-- `LMN_RETRY_FILE` — Publisher-owned retained failures; default `/home/lmnadmin/news_to_publish.retry.json`;
-- `LMN_REJECTED_FILE` — quarantine file for invalid payloads; default `/home/lmnadmin/news_to_publish.rejected.json`.
+- `LMN_RETRY_FILE` — Publisher-owned retained **transient** failures; default `/home/lmnadmin/news_to_publish.retry.json`;
+- `LMN_REJECTED_FILE` — durable quarantine for invalid payloads and non-transient/permanent publication failures; default `/home/lmnadmin/news_to_publish.rejected.json`.
 
 These three Publisher paths must be distinct. The Publisher rejects a configuration that aliases inbound, retry and quarantine ownership. In particular, **do not configure the Harvester output and Publisher retry file to the same path**.
 
-At the beginning of a publish run, retained retry work and the new inbound batch are merged deterministically by `source_url`. The Publisher persists its next retry state and rejected state before relinquishing the inbound file. If the process crashes after a successful database write but before relinquishing inbound state, the database `UNIQUE (source_url)` / idempotent upsert contract makes the replay a safe duplicate no-op rather than data loss.
+At the beginning of a publish run, retained retry work and the new inbound batch are merged deterministically by `source_url`. Network/time-out failures receive the bounded retry policy and remain in `LMN_RETRY_FILE` only when they are still retryable after those attempts. Invalid payloads and non-transport failures are moved to `LMN_REJECTED_FILE` rather than being retried indefinitely. Exception details are logged only by type; the quarantine persists the payload, not raw exception text that could contain sensitive provider details.
 
-A non-zero Publisher exit means work remains retryable or the queue/result state could not be handled safely. Automation must not report that run as successful.
+The Publisher persists its next retry state and rejected state before relinquishing the inbound file. If the process crashes after a successful database write but before relinquishing inbound state, the database `UNIQUE (source_url)` / idempotent upsert contract makes the replay a safe duplicate no-op rather than data loss.
+
+A Publisher run exits non-zero when it creates new retryable or quarantine work, or when queue/result state cannot be handled safely. This makes partial failure visible to orchestration. Quarantined items are not active input: a later run with no inbound/retry work succeeds without repeatedly submitting permanent failures. Automation must not report the original partially unsuccessful run as green merely because its rejected state was persisted safely.
 
 ### Durable handoff ownership
 
@@ -88,8 +90,8 @@ The file handoff intentionally separates four ownership states:
 
 1. **Harvester pending** — `LMN_OUTPUT_FILE`, which survives until transfer is confirmed.
 2. **Publisher inbound** — `LMN_INPUT_FILE`, a newly transferred batch.
-3. **Publisher retry** — `LMN_RETRY_FILE`, failures retained independently across future inbound batches.
-4. **Publisher rejected** — `LMN_REJECTED_FILE`, quarantine for invalid payloads.
+3. **Publisher retry** — `LMN_RETRY_FILE`, transient failures retained independently across future inbound batches.
+4. **Publisher rejected** — `LMN_REJECTED_FILE`, quarantine for invalid or permanent failures that must not be retried automatically.
 
 For a same-host deployment, use four distinct files in one directory, for example:
 
@@ -117,7 +119,7 @@ A deployment without Ollama can still build/test the repository; live ingestion 
 - the Harvester source file is deleted only after Publisher inbound transfer succeeds;
 - Publisher inbound never overwrites Publisher retry state;
 - Publisher non-zero exit is propagated instead of printing a false success;
-- VM shutdown after a Publisher failure is allowed only because the retained inbound/retry files remain durable on disk for the next run.
+- VM shutdown after a Publisher failure is allowed because any active retry state or newly produced quarantine is already durable on disk.
 
 The Hyper-V topology is optional and must not be treated as the only way to develop, test or host the project.
 
@@ -147,7 +149,7 @@ export LMN_RETRY_FILE=/tmp/lmn/publisher.retry.json
 export LMN_REJECTED_FILE=/tmp/lmn/publisher.rejected.json
 ```
 
-A correct smoke test must include at least one partial Publisher failure followed by a second inbound batch and prove that both the retained failure and the new item remain recoverable. Merely proving `process_batch()` in isolation is insufficient for the end-to-end durability claim.
+A correct smoke test must include at least one partial Publisher failure followed by a second inbound batch and prove that retained transient work and the new item remain recoverable. It should also prove that a permanent failure moves to quarantine and is not retried on the following no-work run. Merely proving `process_batch()` in isolation is insufficient for the end-to-end durability claim.
 
 ## Production smoke verification
 
@@ -161,7 +163,8 @@ Deterministic CI cannot prove DNS, hosted Supabase networking, production secret
 - database RLS remains enabled and migrations match the repository;
 - Publisher can perform a controlled idempotent persistence check without exposing credentials;
 - Harvester pending → Publisher inbound ownership transfer preserves any Publisher retry file;
-- a retained Publisher failure survives a subsequent inbound batch;
+- a retained transient Publisher failure survives a subsequent inbound batch;
+- a permanent Publisher failure is quarantined and is not retried automatically;
 - Harvester/provider connectivity is checked separately if live ingestion is enabled.
 
 Do not put production secrets or personal data into CI fixtures or screenshots to obtain this evidence.
@@ -179,4 +182,5 @@ Likewise, provisioning Hyper-V hosts, GPU drivers or local Ollama models is opti
 - a liveness endpoint cannot replace provider-specific monitoring;
 - production data can expose migration conflicts absent from an empty disposable database;
 - file-based handoff depends on durable local/shared storage and the documented ownership transfer;
+- quarantined Publisher items require operator review rather than automatic retry;
 - optional local infrastructure depends on host/network configuration outside the repository.

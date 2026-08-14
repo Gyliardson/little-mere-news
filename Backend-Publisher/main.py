@@ -160,7 +160,7 @@ def publish_with_retry(client, item, sleep_fn=time.sleep):
 
 
 def process_batch(client, news_items, sleep_fn=time.sleep):
-    """Process a batch without losing retryable or permanently failed items."""
+    """Process a batch, retaining transient failures and quarantining permanent ones."""
     retry_queue = []
     rejected = []
     counts = {
@@ -183,8 +183,12 @@ def process_batch(client, news_items, sleep_fn=time.sleep):
         if isinstance(result, tuple):
             status, exc = result
             counts[status] += 1
-            retry_queue.append(item)
-            print(f"  [ERROR] {status} for {item['source_url']}: {type(exc).__name__}")
+            if status == "retryable_failure":
+                retry_queue.append(item)
+                print(f"  [ERROR] retryable_failure for {item['source_url']}: {type(exc).__name__}")
+            else:
+                rejected.append(item)
+                print(f"  [REJECT] permanent_failure for {item['source_url']}: {type(exc).__name__}")
             continue
 
         counts[result] += 1
@@ -197,7 +201,7 @@ def process_batch(client, news_items, sleep_fn=time.sleep):
 
 
 def append_rejected(rejected_file, rejected):
-    """Append rejected payloads durably without discarding previous quarantine data."""
+    """Append quarantined payloads durably without discarding previous quarantine data."""
     if not rejected:
         return
     existing_rejected = []
@@ -254,7 +258,7 @@ def main():
         print(f"[FATAL] Could not persist publisher result queues: {type(exc).__name__}: {exc}")
         return 1
 
-    # The inbound file is relinquished only after all recoverable result state is durable.
+    # The inbound file is relinquished only after all recoverable/quarantined result state is durable.
     input_file.unlink(missing_ok=True)
 
     print("=========================================")
@@ -265,7 +269,10 @@ def main():
     )
     print("=========================================")
 
-    return 1 if retry_queue else 0
+    # Signal newly produced retry/quarantine work once so orchestration does not report
+    # a partially unsuccessful batch as green. Quarantined items are not reprocessed
+    # on later no-work runs because they live outside inbound/retry ownership.
+    return 1 if retry_queue or rejected else 0
 
 
 if __name__ == "__main__":
