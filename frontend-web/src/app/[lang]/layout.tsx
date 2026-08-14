@@ -1,9 +1,10 @@
 import type { Metadata } from "next";
 import { Inter, Montserrat } from "next/font/google";
+import Image from "next/image";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import "../globals.css";
 import LanguageSwitcher from "@/components/layout/LanguageSwitcher";
-import Link from "next/link";
 
 const inter = Inter({ variable: "--font-inter", subsets: ["latin"] });
 const montserrat = Montserrat({ variable: "--font-montserrat", subsets: ["latin"] });
@@ -39,7 +40,14 @@ export default async function RootLayout({ children, params }: Readonly<{ childr
         <header className="border-b border-primary/20 bg-background-secondary p-4 sticky top-0 z-50 shadow-md">
           <div className="max-w-7xl mx-auto flex items-center justify-between">
             <Link href={`/${lang}`} className="flex items-center gap-3 group">
-              <img src="/logo.png" alt="Little Mere News Logo" className="w-10 h-10 object-contain group-hover:scale-105 transition-transform" />
+              <Image
+                src="/logo.png"
+                alt="Little Mere News Logo"
+                width={40}
+                height={40}
+                sizes="40px"
+                className="w-10 h-10 object-contain group-hover:scale-105 transition-transform"
+              />
               <div>
                 <h1 className="text-xl font-bold tracking-tight group-hover:text-accent transition-colors">Little Mere News</h1>
                 <p className="text-xs text-foreground-muted hidden sm:block">Big tech insights from a <span className="text-accent font-medium">Little Mere</span>.</p>
