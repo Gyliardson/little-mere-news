@@ -42,14 +42,31 @@ Current browser coverage proves:
 
 - unsupported locale segments fail closed with not-found behavior;
 - the public feed renders a user-safe provider failure state instead of leaking backend details;
+- an existing article detail renders through the real route and a missing article returns not-found behavior;
 - the administrative login form exposes programmatic labels and keyboard-reachable controls;
 - a request without a session is returned to the login boundary;
-- an authenticated ordinary user is denied administrative access;
+- an authenticated ordinary user is denied administrative route access;
 - a synthetic administrator passes the real browser sign-in, SSR session, server authorization, and `admin_users` membership path before reaching the dashboard;
 - CMS news dialogs expose dialog semantics, keyboard dismissal/focus restoration, accessible icon-button names, and programmatically associated edit labels;
-- representative public/login pages satisfy structural accessibility checks for image alternatives, control names, and form labels.
+- administrator update and delete operations cross the real Next.js Server Action boundary and reach the deterministic Supabase mutation surface;
+- a captured real administrator update Server Action, replayed with an ordinary user's authenticated browser cookie, returns `Forbidden` and does not reach the Supabase mutation surface;
+- representative public, article, and login pages are checked for document language, main landmark count, image alternatives, accessible button/link names, form labels, duplicate IDs, empty/skipped heading structure, positive `tabindex`, and keyboard reachability of representative primary controls.
 
 The browser workflow builds and starts the production Next.js server before running the suite. It uses no production credentials, live Supabase project, Ollama, GPU resources, live feeds, or Hyper-V topology. On failure, it uploads Next.js/fake-Supabase logs and a diagnostic browser screenshot for a short retention period.
+
+## Accessibility scope
+
+The browser accessibility regressions are a **representative deterministic structural and keyboard gate**, not a claim of automated WCAG conformance and not a replacement for a full axe/screen-reader/manual audit. They intentionally exercise stable properties that can be proved without adding a heavyweight browser matrix: semantic landmarks, names/labels, IDs, heading structure, tab-order anti-patterns, and keyboard reachability on representative public/admin pages.
+
+The following still require manual or specialized review when a visual release is approved:
+
+- actual color-contrast measurements across all theme/state combinations;
+- screen-reader announcement quality and reading order beyond DOM semantics;
+- zoom/reflow behavior across the full supported viewport range;
+- focus visibility styling in every interactive state;
+- motion/reduced-motion behavior and other assistive-technology-specific interactions.
+
+A green browser gate must therefore be cited only for the checks it executes, not as blanket accessibility certification.
 
 ## Security gates
 
@@ -64,9 +81,9 @@ The checked-in frontend package manifests are the audited dependency state; reme
 
 ## Test boundaries
 
-The local Supabase fixture is deliberately a contract double rather than a substitute for PostgreSQL/RLS integration tests. Database authorization and uniqueness remain exercised independently by `supabase/tests/rls_contract.sql` against disposable PostgreSQL.
+The local Supabase fixture is deliberately a contract double rather than a substitute for PostgreSQL/RLS integration tests. Database authorization and uniqueness remain exercised independently by `supabase/tests/rls_contract.sql` against disposable PostgreSQL. That contract explicitly verifies ordinary authenticated users cannot insert, update, delete, or self-enroll as administrators, while an authenticated durable admin can mutate news.
 
-Likewise, deterministic browser success does not prove production networking, DNS, third-party availability, or a particular hosted Supabase deployment. Those remain deployment/smoke concerns and should not introduce real secrets into pull-request CI.
+Likewise, deterministic browser success does not prove production networking, DNS, third-party availability, a particular hosted Supabase deployment, or full assistive-technology compatibility. Those remain deployment/manual-smoke concerns and should not introduce real secrets into pull-request CI.
 
 ## Other deterministic gates
 
