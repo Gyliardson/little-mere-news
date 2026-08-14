@@ -50,9 +50,10 @@ Current browser coverage proves:
 - CMS news dialogs expose dialog semantics, keyboard dismissal/focus restoration, accessible icon-button names, and programmatically associated edit labels;
 - administrator update and delete operations cross the real Next.js Server Action boundary and reach the deterministic Supabase mutation surface;
 - a captured real administrator update Server Action, replayed with an ordinary user's authenticated browser cookie, returns `Forbidden` and does not reach the Supabase mutation surface;
+- stored article source URLs are revalidated at both public and CMS presentation boundaries: valid absolute HTTP(S) links remain navigable with `noopener noreferrer`, while `javascript:`, `data:`, relative and malformed stored values render as non-clickable CMS status text;
 - representative public, article, and login pages are checked for document language, main landmark count, image alternatives, accessible button/link names, form labels, duplicate IDs, empty/skipped heading structure, positive `tabindex`, and keyboard reachability of representative primary controls.
 
-The browser workflow builds and starts the production Next.js server before running the suite. It uses no production credentials, live Supabase project, Ollama, GPU resources, live feeds, or Hyper-V topology. On failure, it uploads Next.js/fake-Supabase logs and a diagnostic browser screenshot for a short retention period.
+The browser workflow starts the deterministic Supabase fixture before the production build so database-backed App Router work cannot accidentally depend on a missing provider, then starts the built Next.js server and runs the suite. It uses no production credentials, live Supabase project, Ollama, GPU resources, live feeds, or Hyper-V topology. On failure, it uploads Next.js/fake-Supabase logs and a diagnostic browser screenshot for a short retention period.
 
 ## Accessibility scope
 
