@@ -65,22 +65,37 @@ test("existing public article renders deterministic content", async () => {
   await page.close();
 });
 
-test("effective public layout renders the optimized Next Image logo", async () => {
-  const page = await browser.newPage();
-  const response = await page.goto(`${baseURL}/en/news/${existingArticleId}`, {
-    waitUntil: "domcontentloaded",
-  });
-  assert.equal(response?.status(), 200);
+test("effective public layout renders the optimized logo without desktop or mobile overflow", async () => {
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 390, height: 844 },
+  ]) {
+    const context = await browser.newContext({ viewport });
+    const page = await context.newPage();
+    const response = await page.goto(`${baseURL}/en/news/${existingArticleId}`, {
+      waitUntil: "domcontentloaded",
+    });
+    assert.equal(response?.status(), 200);
 
-  const logo = page.locator('header img[alt="Little Mere News Logo"]');
-  await logo.waitFor();
-  assert.equal(await logo.count(), 1);
-  const source = await logo.getAttribute("src");
-  assert.match(source ?? "", /^\/_next\/image\?url=%2Flogo\.png(?:&|$)/);
-  assert.equal(await logo.getAttribute("width"), "40");
-  assert.equal(await logo.getAttribute("height"), "40");
+    const logo = page.locator('header img[alt="Little Mere News Logo"]');
+    await logo.waitFor();
+    assert.equal(await logo.count(), 1);
+    const source = await logo.getAttribute("src");
+    assert.match(source ?? "", /^\/_next\/image\?url=%2Flogo\.png(?:&|$)/);
+    assert.equal(await logo.getAttribute("width"), "40");
+    assert.equal(await logo.getAttribute("height"), "40");
 
-  await page.close();
+    const box = await logo.boundingBox();
+    assert.equal(Math.round(box?.width ?? 0), 40);
+    assert.equal(Math.round(box?.height ?? 0), 40);
+    const layout = await page.evaluate(() => ({
+      viewportWidth: window.innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    assert.equal(layout.scrollWidth <= layout.viewportWidth, true);
+
+    await context.close();
+  }
 });
 
 test("missing public article returns not found", async () => {
