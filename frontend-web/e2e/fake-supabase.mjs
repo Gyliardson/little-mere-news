@@ -62,32 +62,38 @@ const sessions = new Map([
   [viewerToken, viewerUser],
 ]);
 
-const news = [
-  {
-    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-    category: "AI",
-    source_name: "Fixture Wire",
-    source_url: "https://example.test/articles/fixture-ai",
-    title_en: "Deterministic AI fixture",
-    summary_en: "Synthetic browser-test content.",
-    title_pt: "Fixture determinística de IA",
-    summary_pt: "Conteúdo sintético de teste browser.",
-    published_at: new Date().toISOString(),
-    created_at: new Date().toISOString(),
-  },
-  {
-    id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
-    category: "Development",
-    source_name: "Fixture Wire",
-    source_url: "https://example.test/articles/fixture-dev",
-    title_en: "Deterministic development fixture",
-    summary_en: "Synthetic browser-test content.",
-    title_pt: "Fixture determinística de desenvolvimento",
-    summary_pt: "Conteúdo sintético de teste browser.",
-    published_at: new Date(Date.now() - 86400000).toISOString(),
-    created_at: new Date().toISOString(),
-  },
-];
+function initialNews() {
+  return [
+    {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+      category: "AI",
+      source_name: "Fixture Wire",
+      source_url: "https://example.test/articles/fixture-ai",
+      title_en: "Deterministic AI fixture",
+      summary_en: "Synthetic browser-test content.",
+      title_pt: "Fixture determinística de IA",
+      summary_pt: "Conteúdo sintético de teste browser.",
+      published_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    },
+    {
+      id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      category: "Development",
+      source_name: "Fixture Wire",
+      source_url: "https://example.test/articles/fixture-dev",
+      title_en: "Deterministic development fixture",
+      summary_en: "Synthetic browser-test content.",
+      title_pt: "Fixture determinística de desenvolvimento",
+      summary_pt: "Conteúdo sintético de teste browser.",
+      published_at: new Date(Date.now() - 86400000).toISOString(),
+      created_at: new Date().toISOString(),
+    },
+  ];
+}
+
+let news = initialNews();
+let failNewsReads = false;
+let mutationEvents = [];
 
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", origin);
@@ -96,7 +102,7 @@ function cors(res) {
     "Access-Control-Allow-Headers",
     "authorization, apikey, content-type, x-client-info, x-supabase-api-version, prefer, accept-profile, content-profile",
   );
-  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, HEAD, POST, PATCH, DELETE, OPTIONS");
   res.setHeader("Vary", "Origin");
 }
 
@@ -117,6 +123,34 @@ function bearerToken(req) {
   return value.startsWith("Bearer ") ? value.slice("Bearer ".length) : "";
 }
 
+function currentUser(req) {
+  return sessions.get(bearerToken(req)) ?? null;
+}
+
+function selectedNews(url) {
+  const idFilter = url.searchParams.get("id");
+  if (!idFilter?.startsWith("eq.")) return news;
+  const id = idFilter.slice("eq.".length);
+  return news.filter((item) => item.id === id);
+}
+
+function wantsObject(req) {
+  return String(req.headers.accept ?? "").includes("application/vnd.pgrst.object+json");
+}
+
+function requireAdminMutation(req, res) {
+  const user = currentUser(req);
+  if (!user) {
+    json(res, 401, { code: "42501", message: "not authorized" });
+    return null;
+  }
+  if (user.id !== adminId) {
+    json(res, 403, { code: "42501", message: "permission denied" });
+    return null;
+  }
+  return user;
+}
+
 const server = http.createServer(async (req, res) => {
   cors(res);
   if (req.method === "OPTIONS") {
@@ -126,6 +160,26 @@ const server = http.createServer(async (req, res) => {
   }
 
   const url = new URL(req.url, `http://127.0.0.1:${port}`);
+
+  if (url.pathname === "/__test__/state" && req.method === "GET") {
+    json(res, 200, { failNewsReads, mutationEvents, news });
+    return;
+  }
+
+  if (url.pathname === "/__test__/reset" && req.method === "POST") {
+    news = initialNews();
+    failNewsReads = false;
+    mutationEvents = [];
+    json(res, 200, { ok: true });
+    return;
+  }
+
+  if (url.pathname === "/__test__/news-error" && req.method === "POST") {
+    const body = await readJson(req);
+    failNewsReads = Boolean(body.enabled);
+    json(res, 200, { failNewsReads });
+    return;
+  }
 
   if (req.method === "POST" && url.pathname === "/auth/v1/token") {
     const body = await readJson(req);
@@ -156,7 +210,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === "GET" && url.pathname === "/auth/v1/user") {
-    const user = sessions.get(bearerToken(req));
+    const user = currentUser(req);
     if (!user) {
       json(res, 401, { message: "invalid token" });
       return;
@@ -166,33 +220,80 @@ const server = http.createServer(async (req, res) => {
   }
 
   if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/rest/v1/admin_users") {
-    const user = sessions.get(bearerToken(req));
+    const user = currentUser(req);
     if (!user) {
       json(res, 401, { message: "not authorized" });
       return;
     }
 
     const membership = user.id === adminId ? { user_id: adminId } : null;
-    const wantsObject = String(req.headers.accept ?? "").includes(
-      "application/vnd.pgrst.object+json",
-    );
-    if (wantsObject && !membership) {
+    const objectResponse = wantsObject(req);
+    if (objectResponse && !membership) {
       json(res, 406, { code: "PGRST116", message: "No rows found" });
       return;
     }
-    json(res, 200, wantsObject ? membership : membership ? [membership] : []);
+    json(res, 200, objectResponse ? membership : membership ? [membership] : []);
     return;
   }
 
   if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/rest/v1/news") {
-    const headers = { "content-range": `0-${news.length - 1}/${news.length}` };
+    if (failNewsReads) {
+      json(res, 503, { code: "E2E_PROVIDER_FAILURE", message: "synthetic provider failure" });
+      return;
+    }
+
+    const selected = selectedNews(url);
     if (req.method === "HEAD") {
       cors(res);
-      res.writeHead(200, headers);
+      res.writeHead(200, { "content-range": `0-${Math.max(selected.length - 1, 0)}/${selected.length}` });
       res.end();
       return;
     }
-    json(res, 200, news, headers);
+
+    if (wantsObject(req)) {
+      if (selected.length !== 1) {
+        json(res, 406, { code: "PGRST116", message: "JSON object requested, multiple (or no) rows returned" });
+        return;
+      }
+      json(res, 200, selected[0]);
+      return;
+    }
+
+    json(res, 200, selected, {
+      "content-range": `0-${Math.max(selected.length - 1, 0)}/${selected.length}`,
+    });
+    return;
+  }
+
+  if (req.method === "PATCH" && url.pathname === "/rest/v1/news") {
+    const user = requireAdminMutation(req, res);
+    if (!user) return;
+
+    const selected = selectedNews(url);
+    if (selected.length !== 1) {
+      json(res, 404, { code: "PGRST116", message: "news row not found" });
+      return;
+    }
+    const body = await readJson(req);
+    Object.assign(selected[0], body);
+    mutationEvents.push({ method: "PATCH", id: selected[0].id, user_id: user.id });
+    json(res, 200, []);
+    return;
+  }
+
+  if (req.method === "DELETE" && url.pathname === "/rest/v1/news") {
+    const user = requireAdminMutation(req, res);
+    if (!user) return;
+
+    const selected = selectedNews(url);
+    if (selected.length !== 1) {
+      json(res, 404, { code: "PGRST116", message: "news row not found" });
+      return;
+    }
+    const id = selected[0].id;
+    news = news.filter((item) => item.id !== id);
+    mutationEvents.push({ method: "DELETE", id, user_id: user.id });
+    json(res, 200, []);
     return;
   }
 
