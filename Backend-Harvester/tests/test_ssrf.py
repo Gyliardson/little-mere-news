@@ -172,6 +172,41 @@ def test_transport_never_receives_hostname_as_connection_destination():
     assert transport.calls[0][1] != "public.example"
 
 
+def test_pinned_https_dials_approved_ip_but_verifies_original_hostname(monkeypatch):
+    events = {}
+    raw_socket = object()
+    wrapped_socket = object()
+
+    def fake_connect(connection):
+        events["dial_host"] = connection.host
+        connection.sock = raw_socket
+
+    class FakeContext:
+        def wrap_socket(self, sock, server_hostname):
+            events["wrapped_socket"] = sock
+            events["server_hostname"] = server_hostname
+            return wrapped_socket
+
+    monkeypatch.setattr(harvester.http.client.HTTPConnection, "connect", fake_connect)
+    connection = harvester.PinnedHTTPSConnection(
+        address=PUBLIC_IP,
+        hostname="public.example",
+        port=443,
+        timeout=harvester.SOURCE_TIMEOUT_SECONDS,
+    )
+    connection._context = FakeContext()
+
+    connection.connect()
+
+    assert events == {
+        "dial_host": PUBLIC_IP,
+        "wrapped_socket": raw_socket,
+        "server_hostname": "public.example",
+    }
+    assert connection.host == "public.example"
+    assert connection.sock is wrapped_socket
+
+
 def test_redirect_count_is_bounded(monkeypatch):
     total_requests = (harvester.MAX_REDIRECTS + 1) * (harvester.MAX_RETRIES + 1)
     transport = Transport([Response(302, location="/again") for _ in range(total_requests)])
