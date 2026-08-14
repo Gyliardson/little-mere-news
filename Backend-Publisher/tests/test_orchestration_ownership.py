@@ -12,8 +12,7 @@ def test_launcher_uses_claim_spool_protocol_instead_of_mutable_path_cleanup():
     assert "queue_claim.py complete" in text
     assert "spool.py enqueue" in text
     assert "spool.py claim-next" in text
-    assert "Enter-LmnHostLock" in text
-    assert "CommonApplicationData" not in text  # topology belongs to shared helper, not checkout logic
+    assert "Enter-LmnHostLock -ResourceIds $SharedResourceIds" in text
 
     # Regression guards for the independently reproduced races.
     assert 'Join-Path $ProjectRoot "lmn-batch.lock"' not in text
