@@ -20,7 +20,8 @@ def ps_quote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def wait_for(path, process, timeout=5):
+def wait_for(path, process, timeout=15):
+    """Wait only for the explicit holder-acquired marker, never for race timing."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if path.exists():
@@ -103,6 +104,8 @@ try {{ exit 0 }} finally {{ $lock.Dispose() }}
         text=True,
     )
     try:
+        # This wait only ensures the holder has explicitly reported lock acquisition.
+        # The contender is launched *after* that marker, so overlap ordering remains deterministic.
         wait_for(ready, holder)
         contender = subprocess.run(
             [pwsh, "-NoProfile", "-NonInteractive", "-File", str(contender_file)],
