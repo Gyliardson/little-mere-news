@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import socket
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +24,10 @@ VALID_AI = {
 
 def rss_time(year=2026, month=8, day=13, hour=8):
     return (year, month, day, hour, 0, 0, 0, 0, 0)
+
+
+def public_resolver(host, port, type=socket.SOCK_STREAM):
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))]
 
 
 def test_clean_html_removes_markup_and_normalizes_text():
@@ -151,38 +156,47 @@ def test_fetch_feed_retries_transport_failure(monkeypatch):
     calls = []
 
     class Response:
+        status_code = 200
+        headers = {}
         content = b"<rss><channel><title>Source</title></channel></rss>"
 
         def raise_for_status(self):
             return None
 
     class Session:
-        def get(self, url, timeout):
-            calls.append((url, timeout))
+        def get(self, url, timeout, allow_redirects):
+            calls.append((url, timeout, allow_redirects))
             if len(calls) < 3:
                 raise requests.Timeout("slow source")
             return Response()
 
     monkeypatch.setattr(harvester.time, "sleep", lambda _: None)
-    parsed = harvester.fetch_feed("https://example.com/feed", session=Session())
+    parsed = harvester.fetch_feed(
+        "https://example.com/feed", session=Session(), resolver=public_resolver
+    )
     assert len(calls) == 3
+    assert all(call[2] is False for call in calls)
     assert parsed.feed.title == "Source"
 
 
 def test_fetch_feed_rejects_malformed_feed_without_live_network(monkeypatch):
     class Response:
+        status_code = 200
+        headers = {}
         content = b"this is not a feed"
 
         def raise_for_status(self):
             return None
 
     class Session:
-        def get(self, url, timeout):
+        def get(self, url, timeout, allow_redirects):
             return Response()
 
     monkeypatch.setattr(harvester.time, "sleep", lambda _: None)
     with pytest.raises(RuntimeError, match="Feed unavailable after retries"):
-        harvester.fetch_feed("https://example.com/feed", session=Session())
+        harvester.fetch_feed(
+            "https://example.com/feed", session=Session(), resolver=public_resolver
+        )
 
 
 def test_ollama_provider_retries_timeout_and_validates_output(monkeypatch):
