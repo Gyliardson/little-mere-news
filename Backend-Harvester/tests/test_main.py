@@ -163,19 +163,18 @@ def test_fetch_feed_retries_transport_failure(monkeypatch):
         def raise_for_status(self):
             return None
 
-    class Session:
-        def get(self, url, timeout, allow_redirects):
-            calls.append((url, timeout, allow_redirects))
-            if len(calls) < 3:
-                raise requests.Timeout("slow source")
-            return Response()
+    def transport(url, address):
+        calls.append((url, str(address)))
+        if len(calls) < 3:
+            raise harvester.FeedTransportError("slow source")
+        return Response()
 
     monkeypatch.setattr(harvester.time, "sleep", lambda _: None)
     parsed = harvester.fetch_feed(
-        "https://example.com/feed", session=Session(), resolver=public_resolver
+        "https://example.com/feed", transport=transport, resolver=public_resolver
     )
     assert len(calls) == 3
-    assert all(call[2] is False for call in calls)
+    assert all(call[1] == "93.184.216.34" for call in calls)
     assert parsed.feed.title == "Source"
 
 
@@ -188,14 +187,12 @@ def test_fetch_feed_rejects_malformed_feed_without_live_network(monkeypatch):
         def raise_for_status(self):
             return None
 
-    class Session:
-        def get(self, url, timeout, allow_redirects):
-            return Response()
-
     monkeypatch.setattr(harvester.time, "sleep", lambda _: None)
     with pytest.raises(RuntimeError, match="Feed unavailable after retries"):
         harvester.fetch_feed(
-            "https://example.com/feed", session=Session(), resolver=public_resolver
+            "https://example.com/feed",
+            transport=lambda url, address: Response(),
+            resolver=public_resolver,
         )
 
 
