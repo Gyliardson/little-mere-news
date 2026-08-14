@@ -492,8 +492,9 @@ function Show-FinalReport {
     Write-Host "  Next Steps:" -ForegroundColor Cyan
     Write-Host "  1. Boot each VM and install Ubuntu Server 24.04 LTS." -ForegroundColor White
     Write-Host "  2. Configure static IP addresses on the $SwitchName subnet." -ForegroundColor White
-    Write-Host "  3. Distribute SSH Ed25519 keys for passwordless automation." -ForegroundColor White
-    Write-Host "  4. Execute the Python setup scripts on the respective instances." -ForegroundColor White
+    Write-Host "  3. Enroll verified SSH host keys and configure passwordless administrative access." -ForegroundColor White
+    Write-Host "  4. Run .\Infrastructure\Bootstrap-LMN-Guests.ps1 from this reviewed checkout." -ForegroundColor White
+    Write-Host "     That path transfers the canonical Python requirements and bounded Ollama setup." -ForegroundColor DarkGray
     Write-Host ""
 }
 
