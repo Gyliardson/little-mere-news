@@ -133,6 +133,8 @@ This does not claim cross-host distributed locking. If multiple physical Windows
 
 The launcher uses strict host-key verification, batch mode and an explicit `known_hosts` file. VM host keys must be enrolled only after fingerprint verification through a trusted channel. Unknown/changed host keys fail closed.
 
+`ssh-keyscan` is **not** a trust-establishment mechanism by itself. If it is used only to collect a candidate public host key, compare that key's fingerprint through a separate trusted channel before adding it to the operational `known_hosts` file.
+
 ### Publisher secrets
 
 The launcher does not interpolate `SUPABASE_URL` or `SUPABASE_KEY` from the Windows host command line. Provision them on the trusted Publisher VM in:
