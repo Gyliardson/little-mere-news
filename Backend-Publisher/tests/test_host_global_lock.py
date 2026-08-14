@@ -29,7 +29,12 @@ def wait_for(path, process, timeout=5):
             stdout, stderr = process.communicate()
             raise AssertionError(f"lock holder exited before barrier: {stdout}\n{stderr}")
         time.sleep(0.05)
-    raise AssertionError("timed out waiting for lock-holder barrier")
+    stdout = stderr = ""
+    if process.poll() is not None:
+        stdout, stderr = process.communicate()
+    raise AssertionError(
+        f"timed out waiting for lock-holder barrier; rc={process.poll()} stdout={stdout} stderr={stderr}"
+    )
 
 
 def test_two_launcher_processes_from_different_checkouts_share_one_host_lock(tmp_path):
@@ -44,12 +49,14 @@ def test_two_launcher_processes_from_different_checkouts_share_one_host_lock(tmp
     release = tmp_path / "holder-release"
     path_a_file = tmp_path / "path-a.txt"
     path_b_file = tmp_path / "path-b.txt"
+    holder_file = tmp_path / "holder.ps1"
+    contender_file = tmp_path / "contender.ps1"
     checkout_a.mkdir()
     checkout_b.mkdir()
 
     resources = ", ".join(ps_quote(resource) for resource in RESOURCES)
-    holder_script = f"""
-$ErrorActionPreference = 'Stop'
+    holder_file.write_text(
+        f"""$ErrorActionPreference = 'Stop'
 . {ps_quote(HELPER)}
 $resources = @({resources})
 $root = {ps_quote(lock_root)}
@@ -58,7 +65,7 @@ $path = Get-LmnHostLockPath -ResourceIds $resources -LockRootOverride $root
 Set-Content -LiteralPath {ps_quote(path_a_file)} -Value $path -NoNewline
 $lock = Enter-LmnHostLock -ResourceIds $resources -LockRootOverride $root
 try {{
-    Set-Content -LiteralPath {ps_quote(ready)} -Value 'ready' -NoNewline
+    New-Item -ItemType File -Path {ps_quote(ready)} -Force | Out-Null
     $deadline = (Get-Date).AddSeconds(10)
     while (-not (Test-Path -LiteralPath {ps_quote(release)})) {{
         if ((Get-Date) -ge $deadline) {{ throw 'holder release barrier timed out' }}
@@ -67,9 +74,11 @@ try {{
 }} finally {{
     $lock.Dispose()
 }}
-"""
-    contender_script = f"""
-$ErrorActionPreference = 'Stop'
+""",
+        encoding="utf-8",
+    )
+    contender_file.write_text(
+        f"""$ErrorActionPreference = 'Stop'
 . {ps_quote(HELPER)}
 $resources = @({resources})
 $root = {ps_quote(lock_root)}
@@ -83,10 +92,12 @@ try {{
 }} catch [System.IO.IOException] {{
     exit 0
 }}
-"""
+""",
+        encoding="utf-8",
+    )
 
     holder = subprocess.Popen(
-        [pwsh, "-NoProfile", "-NonInteractive", "-Command", holder_script],
+        [pwsh, "-NoProfile", "-NonInteractive", "-File", str(holder_file)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -94,7 +105,7 @@ try {{
     try:
         wait_for(ready, holder)
         contender = subprocess.run(
-            [pwsh, "-NoProfile", "-NonInteractive", "-Command", contender_script],
+            [pwsh, "-NoProfile", "-NonInteractive", "-File", str(contender_file)],
             check=False,
             capture_output=True,
             text=True,
