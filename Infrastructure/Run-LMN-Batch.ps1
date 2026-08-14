@@ -8,7 +8,8 @@ any retained Publisher state before harvesting new work, transfers a durable inb
 batch, and propagates every SSH/SCP/worker failure instead of reporting false success.
 Remote host identity is verified against a pre-enrolled known_hosts file, and
 Publisher secrets remain provisioned on the Publisher VM rather than being sent in
-SSH command arguments.
+SSH command arguments. Repository-local worker sources are resolved from this script's
+location and never from the caller's current working directory.
 #>
 
 function Stop-LmnCluster {
@@ -59,7 +60,26 @@ function Wait-LmnVmNetwork {
     Fail-LmnBatch -Message "VM $IpAddress did not become reachable within $TimeoutSeconds seconds" -VmNames $VmNames
 }
 
-$lockPath = Join-Path $PSScriptRoot "..\lmn-batch.lock"
+$ProjectRoot = Split-Path $PSScriptRoot -Parent
+$HarvesterFeedsSource = Join-Path $ProjectRoot "Backend-Harvester\feeds.json"
+$HarvesterCodeSource = Join-Path $ProjectRoot "Backend-Harvester\main.py"
+$PublisherCodeSource = Join-Path $ProjectRoot "Backend-Publisher\main.py"
+$HostTemp = Join-Path $ProjectRoot "news_to_publish_temp.json"
+
+$RequiredLocalSources = @(
+    $HarvesterFeedsSource,
+    $HarvesterCodeSource,
+    $PublisherCodeSource
+)
+foreach ($sourcePath in $RequiredLocalSources) {
+    if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+        Write-Host "[ERROR] Required repository source file was not found: $sourcePath" -ForegroundColor Red
+        Write-Host "Run the batch from a complete Little Mere News checkout; no VMs were started." -ForegroundColor Yellow
+        exit 1
+    }
+}
+
+$lockPath = Join-Path $ProjectRoot "lmn-batch.lock"
 try {
     $batchLock = [System.IO.File]::Open(
         $lockPath,
@@ -109,7 +129,6 @@ try {
     $PublisherRetry = "/home/lmnadmin/news_to_publish.retry.json"
     $PublisherRejected = "/home/lmnadmin/news_to_publish.rejected.json"
     $PublisherEnvFile = "/home/lmnadmin/.config/lmn/publisher.env"
-    $HostTemp = Join-Path $PSScriptRoot "..\news_to_publish_temp.json"
 
     # The remote environment file is provisioned manually on the trusted Publisher VM.
     # Secret values are expanded only by the remote shell and are never interpolated
@@ -137,13 +156,13 @@ try {
         ssh @SshOptions $PublisherHost $PublisherEnvCheck
     }
     Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Could not transfer feeds.json to Harvester" -Command {
-        scp @SshOptions ".\Backend-Harvester\feeds.json" "${HarvesterHost}:/home/lmnadmin/feeds.json" | Out-Null
+        scp @SshOptions $HarvesterFeedsSource "${HarvesterHost}:/home/lmnadmin/feeds.json" | Out-Null
     }
     Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Could not transfer Harvester code" -Command {
-        scp @SshOptions ".\Backend-Harvester\main.py" "${HarvesterHost}:/home/lmnadmin/main.py" | Out-Null
+        scp @SshOptions $HarvesterCodeSource "${HarvesterHost}:/home/lmnadmin/main.py" | Out-Null
     }
     Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Could not transfer Publisher code" -Command {
-        scp @SshOptions ".\Backend-Publisher\main.py" "${PublisherHost}:/home/lmnadmin/main.py" | Out-Null
+        scp @SshOptions $PublisherCodeSource "${PublisherHost}:/home/lmnadmin/main.py" | Out-Null
     }
 
     Write-Host "[3/6] Draining retained Publisher inbound/retry state before harvesting new work..." -ForegroundColor Yellow
