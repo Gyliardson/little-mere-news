@@ -292,7 +292,14 @@ def append_rejected(rejected_file, rejected):
     atomic_write_json(rejected_file, [*existing_rejected, *rejected])
 
 
-def run_locked_publisher(input_file, retry_file, rejected_file, supabase_url, supabase_key):
+def run_locked_publisher(
+    input_file,
+    retry_file,
+    rejected_file,
+    supabase_url,
+    supabase_key,
+    allow_retained_retry_success=False,
+):
     if not input_file.exists() and not retry_file.exists():
         print("[INFO] No inbound or retry queue found. Nothing to publish.")
         return 0
@@ -335,10 +342,11 @@ def run_locked_publisher(input_file, retry_file, rejected_file, supabase_url, su
     )
     print("=========================================")
 
-    # Retained transient work is durable and paced, so it is not an orchestration
-    # failure: returning zero allows the launcher to keep harvesting independent work.
-    # Quarantine remains fail-closed and non-zero for operator attention.
-    return 1 if rejected else 0
+    if rejected:
+        return 1
+    if retry_queue and not allow_retained_retry_success:
+        return 1
+    return 0
 
 
 def main():
@@ -362,6 +370,7 @@ def main():
                 rejected_file,
                 supabase_url,
                 supabase_key,
+                allow_retained_retry_success=True,
             )
     except (OSError, RuntimeError) as exc:
         print(f"[FATAL] Could not acquire Publisher queue ownership: {exc}")
