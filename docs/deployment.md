@@ -151,11 +151,37 @@ chmod 600 /home/lmnadmin/.config/lmn/publisher.env
 
 The environment file itself contains deployment-specific values and must never be committed. The launcher verifies that it is readable and that the required variables exist without printing secret values.
 
-### Worker transfer and dependency bootstrap
+### Worker transfer and reviewed guest bootstrap
 
-The launcher transfers repository worker code and ownership helpers at execution time. Worker Python dependency manifests remain canonical under each service's `requirements*.txt` files.
+`Infrastructure/Bootstrap-LMN-Guests.ps1` is the supported post-Ubuntu guest bootstrap path. It reads the exact `Backend-Harvester/requirements.txt` and `Backend-Publisher/requirements.txt` from the current reviewed checkout, transfers those manifests plus their setup scripts over strict known-host SSH, and invokes the guest setup scripts with the transferred requirements paths as explicit arguments.
 
-The optional VM setup scripts are deployment conveniences, **not currently evidence by themselves of fully reproducible/supply-chain-pinned bootstrap**. Until the dedicated bootstrap remediation is integrated, operators should treat the canonical requirements files and reviewed repository revision as the dependency contract and review any external Ollama installation/model acquisition separately.
+The Harvester/Publisher guest scripts:
+
+- reject a missing requirements manifest;
+- reject non-comment dependency lines that are not exact `==` pins;
+- install only with `python -m pip install --requirement "$REQUIREMENTS_FILE"`;
+- run `pip check` after installation;
+- fail non-zero if the reviewed direct dependency set cannot be installed consistently.
+
+The checked-in requirements files are therefore the shared reviewed direct-dependency contract for CI and the supported VM bootstrap. This is **not** a claim of a fully hermetic Python environment: transitive resolution, Python/venv packages and Ubuntu apt repositories remain upstream inputs. The narrower proven property is that guest provisioning cannot silently choose different top-level Harvester/Publisher versions than those reviewed in the repository.
+
+### Optional Ollama bootstrap
+
+Ollama remains optional and is not a critical CI dependency. The reviewed guest setup no longer downloads and executes the mutable `https://ollama.com/install.sh` endpoint.
+
+`Infrastructure/setup_ollama.sh` currently records:
+
+- Ollama version `0.32.5`;
+- a versioned GitHub release `install.sh` asset URL;
+- the reviewed installer SHA-256 `25f64b810b947145095956533e1bdf56eacea2673c55a7e586be4515fc882c9f`;
+- model reference `llama3:8b`;
+- reviewed model content-identifier prefix `365c0bd3c000`.
+
+Bootstrap verifies the installer bytes before executing them and passes the explicit Ollama version to that script. After pulling `llama3:8b`, it queries the local Ollama API for the full digest and fails if it no longer begins with the reviewed identifier. Because the Harvester historically defaults to `llama3:latest`, the setup creates that **local compatibility alias** only after `llama3:8b` has been verified; it does not pull or trust the upstream mutable `latest` tag.
+
+The 12-character model identifier is documented as an upstream content identifier prefix, not as a repository-known full SHA-256. A mismatch requires an explicit repository review/update.
+
+Residual supply-chain trust remains and is documented rather than hidden: the checksum-verified Ollama installer still downloads the selected Ollama package over HTTPS, and the model registry remains an external source. The repository does not claim reproducible builds or independent end-to-end provenance for those upstream artifacts.
 
 ## Deterministic ownership proof
 
@@ -199,13 +225,15 @@ A deployment smoke should verify, as applicable:
 - an intentionally interrupted claimed batch is recoverable after restart;
 - retained retry state survives a later inbound batch;
 - quarantine remains durable and requires operator review;
-- Hyper-V deployments reject untrusted SSH host keys and load Publisher secrets only from the trusted Publisher-side environment file.
+- Hyper-V deployments reject untrusted SSH host keys and load Publisher secrets only from the trusted Publisher-side environment file;
+- guest Python bootstrap reports installed top-level versions matching the reviewed requirements and `pip check` succeeds;
+- optional Ollama bootstrap reports the reviewed runtime version and verifies the reviewed model identifier before creating the local runtime alias.
 
 ## What remains intentionally external/manual
 
 Pull-request CI does not provision or mutate production Supabase, VM host identities, SSH credentials, Hyper-V hosts, GPU drivers or local model runtimes. These require environment-specific operator actions.
 
-The optional local AI runtime is not part of the critical CI guarantee. External installer/model supply-chain properties must be documented honestly and are reviewed separately from deterministic application correctness.
+The optional local AI runtime is not part of the critical CI guarantee. Its version/checksum/model-identifier checks reduce silent drift in the documented VM path, but upstream package/model provenance remains an external trust boundary.
 
 ## Residual operational risks
 
@@ -215,5 +243,6 @@ The optional local AI runtime is not part of the critical CI guarantee. External
 - queue durability assumes the filesystem honors the atomic same-filesystem rename/link primitives used by the claim/spool helpers;
 - the ProgramData launcher lock serializes one Windows host, not multiple physical hosts;
 - quarantined Publisher items require operator review;
-- optional VM/Ollama provisioning has supply-chain/reproducibility limits until its dedicated remediation is completed;
+- Python guest bootstrap pins reviewed direct dependencies but is not a fully hermetic transitive/OS lock;
+- the verified Ollama installer still depends on upstream HTTPS package delivery, and the model registry remains an external trust boundary;
 - hosted Supabase/network/provider health still needs environment-specific monitoring beyond process liveness.
