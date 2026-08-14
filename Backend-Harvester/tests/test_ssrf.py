@@ -16,7 +16,15 @@ PUBLIC_IP = "93.184.216.34"
 def resolver(mapping):
     def resolve(host, port, type=socket.SOCK_STREAM):
         address = mapping[host]
-        return [(socket.AF_INET6 if ":" in address else socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+        return [
+            (
+                socket.AF_INET6 if ":" in address else socket.AF_INET,
+                socket.SOCK_STREAM,
+                6,
+                "",
+                (address, port),
+            )
+        ]
 
     return resolve
 
@@ -50,7 +58,9 @@ def test_public_feed_succeeds_without_automatic_redirects():
     )
 
     assert parsed.feed.title == "Source"
-    assert session.calls == [("https://public.example/feed", harvester.SOURCE_TIMEOUT_SECONDS, False)]
+    assert session.calls == [
+        ("https://public.example/feed", harvester.SOURCE_TIMEOUT_SECONDS, False)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -77,16 +87,37 @@ def test_non_public_initial_target_is_never_contacted(monkeypatch, target, addre
     assert session.calls == []
 
 
-def test_redirect_to_private_target_is_rejected_before_second_request(monkeypatch):
-    session = Session([Response(302, location="http://internal.example/admin")])
+@pytest.mark.parametrize(
+    ("redirect_url", "redirect_host", "address"),
+    [
+        ("http://loopback.example/admin", "loopback.example", "127.0.0.1"),
+        ("http://private.example/admin", "private.example", "10.0.100.20"),
+        (
+            "http://metadata.example/latest/meta-data",
+            "metadata.example",
+            "169.254.169.254",
+        ),
+        ("http://ipv6-loop.example/admin", "ipv6-loop.example", "::1"),
+        ("http://ipv6-link.example/admin", "ipv6-link.example", "fe80::1"),
+    ],
+)
+def test_redirect_to_non_public_target_is_rejected_before_contact(
+    monkeypatch, redirect_url, redirect_host, address
+):
+    responses = [
+        Response(302, location=redirect_url) for _ in range(harvester.MAX_RETRIES + 1)
+    ]
+    session = Session(responses)
     monkeypatch.setattr(harvester.time, "sleep", lambda _: None)
-    resolve = resolver({"public.example": PUBLIC_IP, "internal.example": "10.0.100.20"})
+    resolve = resolver({"public.example": PUBLIC_IP, redirect_host: address})
 
     with pytest.raises(RuntimeError, match="forbidden non-public"):
         harvester.fetch_feed("https://public.example/feed", session=session, resolver=resolve)
 
-    assert [call[0] for call in session.calls] == ["https://public.example/feed"] * (harvester.MAX_RETRIES + 1)
-    assert all("internal.example" not in call[0] for call in session.calls)
+    assert [call[0] for call in session.calls] == [
+        "https://public.example/feed"
+    ] * (harvester.MAX_RETRIES + 1)
+    assert all(redirect_host not in call[0] for call in session.calls)
 
 
 def test_hostname_resolving_private_is_rejected_without_contact(monkeypatch):
@@ -104,7 +135,8 @@ def test_hostname_resolving_private_is_rejected_without_contact(monkeypatch):
 
 
 def test_redirect_count_is_bounded(monkeypatch):
-    session = Session([Response(302, location="/again") for _ in range((harvester.MAX_REDIRECTS + 1) * (harvester.MAX_RETRIES + 1))])
+    total_requests = (harvester.MAX_REDIRECTS + 1) * (harvester.MAX_RETRIES + 1)
+    session = Session([Response(302, location="/again") for _ in range(total_requests)])
     monkeypatch.setattr(harvester.time, "sleep", lambda _: None)
 
     with pytest.raises(RuntimeError, match="redirect limit exceeded"):
@@ -114,4 +146,4 @@ def test_redirect_count_is_bounded(monkeypatch):
             resolver=resolver({"public.example": PUBLIC_IP}),
         )
 
-    assert len(session.calls) == (harvester.MAX_REDIRECTS + 1) * (harvester.MAX_RETRIES + 1)
+    assert len(session.calls) == total_requests
