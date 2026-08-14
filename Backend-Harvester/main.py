@@ -1,4 +1,5 @@
 import calendar
+import fcntl
 import json
 import os
 import time
@@ -170,6 +171,49 @@ def atomic_write_json(path, value):
             temporary.unlink()
 
 
+def load_pending_batch(path):
+    """Load an existing untransferred Harvester batch and fail closed if corrupt."""
+    target = Path(path)
+    if not target.exists():
+        return []
+    with target.open("r", encoding="utf-8") as file_handle:
+        payload = json.load(file_handle)
+    if not isinstance(payload, list):
+        raise ValueError("existing Harvester output must be a JSON array")
+    return payload
+
+
+def merge_pending_items(existing, new_items):
+    """Preserve prior work and deduplicate by durable source URL."""
+    merged = []
+    seen = set()
+    for item in [*existing, *new_items]:
+        if not isinstance(item, dict) or not valid_source_url(item.get("source_url")):
+            raise ValueError("existing/new Harvester queue contains an invalid item")
+        identity = item["source_url"].strip()
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(item)
+    return merged
+
+
+def persist_pending_batch(path, new_items):
+    """Merge with any untransferred batch under an advisory process lock."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_name(f".{target.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            existing = load_pending_batch(target)
+            merged = merge_pending_items(existing, new_items)
+            atomic_write_json(target, merged)
+            return merged
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
 def harvest(categories, provider=None, now=None, feed_loader=fetch_feed):
     """Run deterministic orchestration while isolating every external feed."""
     provider = provider or OllamaProvider()
@@ -236,19 +280,20 @@ def main():
             raise ValueError("feeds configuration must be an object")
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"[FATAL] Could not load {FEEDS_FILE}: {exc}")
-        return
+        return 1
 
     print("[2/3] Starting RSS Harvesting and AI Processing...")
     processed_news = harvest(categories)
 
-    print(f"[3/3] Harvesting complete. Saving {len(processed_news)} articles...")
+    print(f"[3/3] Harvesting complete. Preserving {len(processed_news)} new articles...")
     try:
-        atomic_write_json(OUTPUT_FILE, processed_news)
-    except OSError as exc:
-        print(f"[FATAL] Could not persist queue atomically: {exc}")
-        return
-    print("Done!")
+        pending = persist_pending_batch(OUTPUT_FILE, processed_news)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"[FATAL] Could not persist durable handoff queue: {exc}")
+        return 1
+    print(f"Done! {len(pending)} total article(s) await transfer.")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

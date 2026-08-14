@@ -53,10 +53,12 @@ Production migrations should always be reviewed against existing data before bei
 
 Runtime configuration used by the worker includes:
 
-- `LMN_FEEDS_FILE` — feed configuration JSON path; legacy default `/home/lmnadmin/feeds.json`;
-- `LMN_OUTPUT_FILE` — validated handoff queue written for the Publisher; legacy default `/home/lmnadmin/news_to_publish.json`;
+- `LMN_FEEDS_FILE` — feed configuration JSON path; default `/home/lmnadmin/feeds.json`;
+- `LMN_OUTPUT_FILE` — Harvester-owned pending handoff file; default `/home/lmnadmin/news_to_publish.json`;
 - `OLLAMA_API_URL` — optional local/provider endpoint;
 - `OLLAMA_MODEL` — provider model name.
+
+The Harvester output is **pending/untransferred state**, not a disposable scratch file. A new run merges validated articles with any previous untransferred batch under an advisory file lock and deduplicates by `source_url`. If existing pending state is malformed, the worker fails non-zero rather than replacing it. This makes an interrupted transfer recoverable and prevents a later harvest from silently discarding the previous batch.
 
 A portable host should set explicit paths/endpoints appropriate to that environment instead of relying on the original `/home/lmnadmin` or private-network defaults. Critical CI does not require live feeds, Ollama or GPU resources; deterministic fixtures cover the important failure modes.
 
@@ -64,20 +66,41 @@ External sources are mutable and untrusted. A deployed Harvester should be treat
 
 ### Publisher
 
-`Backend-Publisher/` consumes validated queue items and persists them to Supabase/PostgreSQL with retry/idempotency behavior.
+`Backend-Publisher/` consumes validated inbound items and persists them to Supabase/PostgreSQL with idempotency and bounded retry behavior.
 
 Runtime configuration:
 
 - `SUPABASE_URL` — Supabase project/API URL for the server-side job;
 - `SUPABASE_KEY` — privileged server/job credential; never expose it to browser code, public environment variables or logs;
-- `LMN_INPUT_FILE` — validated handoff queue consumed by the Publisher; legacy default `/home/lmnadmin/news_to_publish.json`;
-- `LMN_REJECTED_FILE` — quarantine file for invalid payloads; legacy default `/home/lmnadmin/news_to_publish.rejected.json`.
+- `LMN_INPUT_FILE` — new inbound batch owned by the transfer/orchestration boundary; default `/home/lmnadmin/news_to_publish.inbound.json`;
+- `LMN_RETRY_FILE` — Publisher-owned retained failures; default `/home/lmnadmin/news_to_publish.retry.json`;
+- `LMN_REJECTED_FILE` — quarantine file for invalid payloads; default `/home/lmnadmin/news_to_publish.rejected.json`.
 
-For a normal same-host/file-handoff deployment, configure `LMN_OUTPUT_FILE` on the Harvester and `LMN_INPUT_FILE` on the Publisher to the **same path**. The two names are deliberately stage-specific: one service writes the handoff and the other consumes it. `LMN_REJECTED_FILE` must be a different path from `LMN_INPUT_FILE`; the Publisher rejects that unsafe configuration rather than risking queue/quarantine overwrite.
+These three Publisher paths must be distinct. The Publisher rejects a configuration that aliases inbound, retry and quarantine ownership. In particular, **do not configure the Harvester output and Publisher retry file to the same path**.
 
-The old `/home/lmnadmin/...` topology remains the default for backwards compatibility, but it is no longer required. Parent directories for retry/quarantine writes are created as needed and persistence remains atomic.
+At the beginning of a publish run, retained retry work and the new inbound batch are merged deterministically by `source_url`. The Publisher persists its next retry state and rejected state before relinquishing the inbound file. If the process crashes after a successful database write but before relinquishing inbound state, the database `UNIQUE (source_url)` / idempotent upsert contract makes the replay a safe duplicate no-op rather than data loss.
 
-The Publisher can run independently from the frontend host. Its ability to reach the database is a separate operational concern from `/api/health`.
+A non-zero Publisher exit means work remains retryable or the queue/result state could not be handled safely. Automation must not report that run as successful.
+
+### Durable handoff ownership
+
+The file handoff intentionally separates four ownership states:
+
+1. **Harvester pending** — `LMN_OUTPUT_FILE`, which survives until transfer is confirmed.
+2. **Publisher inbound** — `LMN_INPUT_FILE`, a newly transferred batch.
+3. **Publisher retry** — `LMN_RETRY_FILE`, failures retained independently across future inbound batches.
+4. **Publisher rejected** — `LMN_REJECTED_FILE`, quarantine for invalid payloads.
+
+For a same-host deployment, use four distinct files in one directory, for example:
+
+```bash
+export LMN_OUTPUT_FILE=/tmp/lmn/harvester.pending.json
+export LMN_INPUT_FILE=/tmp/lmn/publisher.inbound.json
+export LMN_RETRY_FILE=/tmp/lmn/publisher.retry.json
+export LMN_REJECTED_FILE=/tmp/lmn/publisher.rejected.json
+```
+
+A same-path `LMN_OUTPUT_FILE == LMN_INPUT_FILE` configuration is no longer the recommended portable contract because it makes overlapping worker ownership ambiguous. The safe topology uses a transfer/claim step between Harvester pending and Publisher inbound. The Hyper-V orchestrator implements that ownership transfer explicitly.
 
 ### Optional Ollama/local AI
 
@@ -87,7 +110,16 @@ A deployment without Ollama can still build/test the repository; live ingestion 
 
 ### Optional Hyper-V topology
 
-`Infrastructure/` preserves the original Windows/Hyper-V orchestration as one supported local deployment topology. It is optional and must not be treated as the only way to develop, test or host the project.
+`Infrastructure/Run-LMN-Batch.ps1` preserves the original Windows/Hyper-V topology while enforcing the durable ownership protocol:
+
+- every SSH/SCP boundary is checked;
+- a failed Harvester exits the batch without deleting pending state;
+- the Harvester source file is deleted only after Publisher inbound transfer succeeds;
+- Publisher inbound never overwrites Publisher retry state;
+- Publisher non-zero exit is propagated instead of printing a false success;
+- VM shutdown after a Publisher failure is allowed only because the retained inbound/retry files remain durable on disk for the next run.
+
+The Hyper-V topology is optional and must not be treated as the only way to develop, test or host the project.
 
 ## Clean-room verification
 
@@ -106,15 +138,16 @@ From a fresh clone, the expected verification chain is:
 
 The GitHub Actions workflows implement these boundaries independently so failures remain attributable and CI never needs production credentials.
 
-For a portable file-handoff smoke test outside the legacy topology, choose a temporary queue path and use it consistently:
+For a portable file-handoff smoke test, configure distinct files and explicitly move/copy a completed Harvester pending batch into the Publisher inbound path only after the source batch is durable:
 
 ```bash
-export LMN_OUTPUT_FILE=/tmp/lmn/news_to_publish.json
-export LMN_INPUT_FILE=/tmp/lmn/news_to_publish.json
-export LMN_REJECTED_FILE=/tmp/lmn/news_to_publish.rejected.json
+export LMN_OUTPUT_FILE=/tmp/lmn/harvester.pending.json
+export LMN_INPUT_FILE=/tmp/lmn/publisher.inbound.json
+export LMN_RETRY_FILE=/tmp/lmn/publisher.retry.json
+export LMN_REJECTED_FILE=/tmp/lmn/publisher.rejected.json
 ```
 
-This configuration changes only worker file locations; it does not bypass payload validation, retry behavior, Supabase authorization, or database constraints.
+A correct smoke test must include at least one partial Publisher failure followed by a second inbound batch and prove that both the retained failure and the new item remain recoverable. Merely proving `process_batch()` in isolation is insufficient for the end-to-end durability claim.
 
 ## Production smoke verification
 
@@ -127,7 +160,8 @@ Deterministic CI cannot prove DNS, hosted Supabase networking, production secret
 - an intended administrator can authenticate and reach the CMS;
 - database RLS remains enabled and migrations match the repository;
 - Publisher can perform a controlled idempotent persistence check without exposing credentials;
-- Harvester→Publisher queue paths resolve to the intended shared handoff when file-based ingestion is enabled;
+- Harvester pending → Publisher inbound ownership transfer preserves any Publisher retry file;
+- a retained Publisher failure survives a subsequent inbound batch;
 - Harvester/provider connectivity is checked separately if live ingestion is enabled.
 
 Do not put production secrets or personal data into CI fixtures or screenshots to obtain this evidence.
@@ -144,5 +178,5 @@ Likewise, provisioning Hyper-V hosts, GPU drivers or local Ollama models is opti
 - upstream vulnerability databases may lag undisclosed issues;
 - a liveness endpoint cannot replace provider-specific monitoring;
 - production data can expose migration conflicts absent from an empty disposable database;
-- a file-based Harvester→Publisher handoff still requires both workers to share/reach the configured queue location;
+- file-based handoff depends on durable local/shared storage and the documented ownership transfer;
 - optional local infrastructure depends on host/network configuration outside the repository.

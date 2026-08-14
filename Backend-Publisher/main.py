@@ -11,7 +11,8 @@ from supabase import Client, create_client
 # Little Mere News - Publisher Script
 # ==========================================
 
-DEFAULT_INPUT_FILE = Path("/home/lmnadmin/news_to_publish.json")
+DEFAULT_INPUT_FILE = Path("/home/lmnadmin/news_to_publish.inbound.json")
+DEFAULT_RETRY_FILE = Path("/home/lmnadmin/news_to_publish.retry.json")
 DEFAULT_REJECTED_FILE = Path("/home/lmnadmin/news_to_publish.rejected.json")
 REQUIRED_FIELDS = (
     "category",
@@ -44,15 +45,23 @@ def _configured_file_path(environ, name, default):
 
 
 def get_queue_paths(environ=None):
-    """Resolve queue paths from environment while preserving legacy defaults."""
+    """Resolve distinct inbound, retry and rejected queue paths."""
     environ = os.environ if environ is None else environ
     input_file = _configured_file_path(environ, "LMN_INPUT_FILE", DEFAULT_INPUT_FILE)
+    retry_file = _configured_file_path(environ, "LMN_RETRY_FILE", DEFAULT_RETRY_FILE)
     rejected_file = _configured_file_path(environ, "LMN_REJECTED_FILE", DEFAULT_REJECTED_FILE)
 
-    if input_file.resolve(strict=False) == rejected_file.resolve(strict=False):
-        raise ValueError("LMN_INPUT_FILE and LMN_REJECTED_FILE must be different paths")
+    resolved = {
+        input_file.resolve(strict=False),
+        retry_file.resolve(strict=False),
+        rejected_file.resolve(strict=False),
+    }
+    if len(resolved) != 3:
+        raise ValueError(
+            "LMN_INPUT_FILE, LMN_RETRY_FILE and LMN_REJECTED_FILE must be different paths"
+        )
 
-    return input_file, rejected_file
+    return input_file, retry_file, rejected_file
 
 
 def validate_item(item):
@@ -87,6 +96,36 @@ def atomic_write_json(path, payload):
         file_handle.flush()
         os.fsync(file_handle.fileno())
     os.replace(temp_path, path)
+
+
+def load_queue(path):
+    """Load a queue file and fail closed on malformed/non-array content."""
+    path = Path(path)
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8") as file_handle:
+        payload = json.load(file_handle)
+    if not isinstance(payload, list):
+        raise ValueError(f"Queue {path} must be a JSON array")
+    return payload
+
+
+def merge_queues(*queues):
+    """Merge queues while collapsing valid duplicate source URLs deterministically."""
+    merged = []
+    seen_urls = set()
+    for queue in queues:
+        for item in queue:
+            normalized = validate_item(item)
+            if normalized is None:
+                merged.append(item)
+                continue
+            source_url = normalized["source_url"]
+            if source_url in seen_urls:
+                continue
+            seen_urls.add(source_url)
+            merged.append(item)
+    return merged
 
 
 def publish_item(client, item):
@@ -157,6 +196,16 @@ def process_batch(client, news_items, sleep_fn=time.sleep):
     return counts, retry_queue, rejected
 
 
+def append_rejected(rejected_file, rejected):
+    """Append rejected payloads durably without discarding previous quarantine data."""
+    if not rejected:
+        return
+    existing_rejected = []
+    if rejected_file.exists():
+        existing_rejected = load_queue(rejected_file)
+    atomic_write_json(rejected_file, [*existing_rejected, *rejected])
+
+
 def main():
     print("[1/3] Initializing Publisher...")
 
@@ -167,29 +216,27 @@ def main():
         return 1
 
     try:
-        input_file, rejected_file = get_queue_paths()
+        input_file, retry_file, rejected_file = get_queue_paths()
     except ValueError as exc:
         print(f"[FATAL] Invalid publisher queue configuration: {exc}")
         return 1
 
-    if not input_file.exists():
-        print(f"[INFO] File {input_file} not found. Nothing to publish.")
+    if not input_file.exists() and not retry_file.exists():
+        print("[INFO] No inbound or retry queue found. Nothing to publish.")
         return 0
 
-    print("[2/3] Reading processed news payload...")
+    print("[2/3] Reading inbound and retained retry payloads...")
     try:
-        with input_file.open("r", encoding="utf-8") as file_handle:
-            news_items = json.load(file_handle)
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"[FATAL] Could not read publisher queue: {type(exc).__name__}")
+        retry_items = load_queue(retry_file)
+        inbound_items = load_queue(input_file)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"[FATAL] Could not read publisher queue: {type(exc).__name__}: {exc}")
         return 1
 
-    if not isinstance(news_items, list):
-        print("[FATAL] Publisher queue must be a JSON array.")
-        return 1
-
+    news_items = merge_queues(retry_items, inbound_items)
     if not news_items:
         input_file.unlink(missing_ok=True)
+        retry_file.unlink(missing_ok=True)
         print("[INFO] No news items to publish.")
         return 0
 
@@ -197,28 +244,24 @@ def main():
     print(f"[3/3] Uploading {len(news_items)} items to Supabase...")
     counts, retry_queue, rejected = process_batch(client, news_items)
 
-    if retry_queue:
-        atomic_write_json(input_file, retry_queue)
-    else:
-        input_file.unlink(missing_ok=True)
+    try:
+        if retry_queue:
+            atomic_write_json(retry_file, retry_queue)
+        else:
+            retry_file.unlink(missing_ok=True)
+        append_rejected(rejected_file, rejected)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"[FATAL] Could not persist publisher result queues: {type(exc).__name__}: {exc}")
+        return 1
 
-    if rejected:
-        existing_rejected = []
-        if rejected_file.exists():
-            try:
-                with rejected_file.open("r", encoding="utf-8") as file_handle:
-                    loaded = json.load(file_handle)
-                    if isinstance(loaded, list):
-                        existing_rejected = loaded
-            except (OSError, json.JSONDecodeError):
-                pass
-        atomic_write_json(rejected_file, [*existing_rejected, *rejected])
+    # The inbound file is relinquished only after all recoverable result state is durable.
+    input_file.unlink(missing_ok=True)
 
     print("=========================================")
     print(
         " Publish complete: "
         f"{counts['published']} new, {counts['duplicate']} duplicate, "
-        f"{len(retry_queue)} queued for retry, {len(rejected)} rejected."
+        f"{len(retry_queue)} retained for retry, {len(rejected)} rejected."
     )
     print("=========================================")
 
