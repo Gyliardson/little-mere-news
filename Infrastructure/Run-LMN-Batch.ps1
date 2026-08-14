@@ -6,6 +6,9 @@ Master orchestration script for the Little Mere News batch processing architectu
 Starts the required Hyper-V Virtual Machines, serializes batch executions, drains
 any retained Publisher state before harvesting new work, transfers a durable inbound
 batch, and propagates every SSH/SCP/worker failure instead of reporting false success.
+Remote host identity is verified against a pre-enrolled known_hosts file, and
+Publisher secrets remain provisioned on the Publisher VM rather than being sent in
+SSH command arguments.
 #>
 
 function Stop-LmnCluster {
@@ -51,24 +54,23 @@ try {
 }
 
 try {
-    $envFilePath = Join-Path $PSScriptRoot "..\.env"
-    if (Test-Path $envFilePath) {
-        Get-Content $envFilePath | Where-Object { $_ -match '=' -and $_ -notmatch '^#' } | ForEach-Object {
-            $name, $value = $_.Split('=', 2)
-            Set-Item -Path "env:\$name" -Value $value.Trim()
-        }
+    $KnownHostsFile = if ($env:LMN_KNOWN_HOSTS_FILE) {
+        $env:LMN_KNOWN_HOSTS_FILE
     } else {
-        Write-Host "[ERROR] .env file not found in the project root!" -ForegroundColor Red
-        Write-Host "Copy .env.example to .env and insert the required server-side values." -ForegroundColor Yellow
+        Join-Path (Join-Path $HOME ".ssh") "known_hosts"
+    }
+
+    if (-not (Test-Path -LiteralPath $KnownHostsFile -PathType Leaf)) {
+        Write-Host "[ERROR] Trusted SSH known_hosts file was not found: $KnownHostsFile" -ForegroundColor Red
+        Write-Host "Verify each VM host-key fingerprint through a trusted channel and enroll it before running the batch." -ForegroundColor Yellow
         exit 1
     }
 
-    $SUPABASE_URL = $env:SUPABASE_URL
-    $SUPABASE_KEY = $env:SUPABASE_KEY
-    if (-not $SUPABASE_URL -or -not $SUPABASE_KEY) {
-        Write-Host "[ERROR] SUPABASE_URL and SUPABASE_KEY are required." -ForegroundColor Red
-        exit 1
-    }
+    $SshOptions = @(
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "UserKnownHostsFile=$KnownHostsFile",
+        "-o", "BatchMode=yes"
+    )
 
     $VMs = "LMN-Harvester", "LMN-Brain", "LMN-Publisher"
     $HarvesterHost = "lmnadmin@10.0.100.10"
@@ -77,8 +79,14 @@ try {
     $PublisherInbound = "/home/lmnadmin/news_to_publish.inbound.json"
     $PublisherRetry = "/home/lmnadmin/news_to_publish.retry.json"
     $PublisherRejected = "/home/lmnadmin/news_to_publish.rejected.json"
+    $PublisherEnvFile = "/home/lmnadmin/.config/lmn/publisher.env"
     $HostTemp = Join-Path $PSScriptRoot "..\news_to_publish_temp.json"
-    $PublisherCommand = "export SUPABASE_URL='$SUPABASE_URL' && export SUPABASE_KEY='$SUPABASE_KEY' && export LMN_INPUT_FILE='$PublisherInbound' && export LMN_RETRY_FILE='$PublisherRetry' && export LMN_REJECTED_FILE='$PublisherRejected' && /home/lmnadmin/publisher-env/bin/python /home/lmnadmin/main.py"
+
+    # The remote environment file is provisioned manually on the trusted Publisher VM.
+    # Secret values are expanded only by the remote shell and are never interpolated
+    # into this local SSH command string.
+    $PublisherEnvCheck = "test -r '$PublisherEnvFile' && set -a && . '$PublisherEnvFile' && set +a && test -n `"`$SUPABASE_URL`" && test -n `"`$SUPABASE_KEY`""
+    $PublisherCommand = "$PublisherEnvCheck && export LMN_INPUT_FILE='$PublisherInbound' && export LMN_RETRY_FILE='$PublisherRetry' && export LMN_REJECTED_FILE='$PublisherRejected' && /home/lmnadmin/publisher-env/bin/python /home/lmnadmin/main.py"
 
     Write-Host "=========================================" -ForegroundColor Cyan
     Write-Host " LMN BATCH PROCESSOR - INITIALIZING      " -ForegroundColor Cyan
@@ -101,19 +109,22 @@ try {
     Write-Host "      Waiting for services (SSH, Ollama) to initialize (15s)..." -ForegroundColor DarkGray
     Start-Sleep -Seconds 15
 
-    Write-Host "[2/6] Transferring Python logic to VMs..." -ForegroundColor Yellow
+    Write-Host "[2/6] Verifying trusted SSH endpoints and transferring Python logic..." -ForegroundColor Yellow
+    Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Publisher server-side environment is missing or incomplete" -Command {
+        ssh @SshOptions $PublisherHost $PublisherEnvCheck
+    }
     Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Could not transfer feeds.json to Harvester" -Command {
-        scp -o StrictHostKeyChecking=no ".\Backend-Harvester\feeds.json" "${HarvesterHost}:/home/lmnadmin/feeds.json" | Out-Null
+        scp @SshOptions ".\Backend-Harvester\feeds.json" "${HarvesterHost}:/home/lmnadmin/feeds.json" | Out-Null
     }
     Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Could not transfer Harvester code" -Command {
-        scp -o StrictHostKeyChecking=no ".\Backend-Harvester\main.py" "${HarvesterHost}:/home/lmnadmin/main.py" | Out-Null
+        scp @SshOptions ".\Backend-Harvester\main.py" "${HarvesterHost}:/home/lmnadmin/main.py" | Out-Null
     }
     Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Could not transfer Publisher code" -Command {
-        scp -o StrictHostKeyChecking=no ".\Backend-Publisher\main.py" "${PublisherHost}:/home/lmnadmin/main.py" | Out-Null
+        scp @SshOptions ".\Backend-Publisher\main.py" "${PublisherHost}:/home/lmnadmin/main.py" | Out-Null
     }
 
     Write-Host "[3/6] Draining retained Publisher inbound/retry state before harvesting new work..." -ForegroundColor Yellow
-    & ssh -o StrictHostKeyChecking=no $PublisherHost $PublisherCommand
+    & ssh @SshOptions $PublisherHost $PublisherCommand
     $preflightExit = $LASTEXITCODE
     if ($preflightExit -ne 0) {
         Write-Host "      [WARN] Publisher reported retained/rejected work or an unsafe queue result (exit $preflightExit)." -ForegroundColor Yellow
@@ -124,19 +135,19 @@ try {
 
     Write-Host "[4/6] Triggering LMN-Harvester (Data Collection & AI Processing)..." -ForegroundColor Yellow
     Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Harvester failed; existing handoff remains recoverable" -Command {
-        ssh -o StrictHostKeyChecking=no $HarvesterHost "/home/lmnadmin/harvester-env/bin/python /home/lmnadmin/main.py"
+        ssh @SshOptions $HarvesterHost "/home/lmnadmin/harvester-env/bin/python /home/lmnadmin/main.py"
     }
     Write-Host "      Harvester completed and durable handoff state is ready." -ForegroundColor Green
 
     Write-Host "[5/6] Transferring new inbound batch and triggering LMN-Publisher..." -ForegroundColor Yellow
     Remove-Item $HostTemp -Force -ErrorAction SilentlyContinue
 
-    & scp -o StrictHostKeyChecking=no "${HarvesterHost}:$HarvesterQueue" $HostTemp 2>$null
+    & scp @SshOptions "${HarvesterHost}:$HarvesterQueue" $HostTemp 2>$null
     if ($LASTEXITCODE -ne 0) {
         Fail-LmnBatch -Message "Could not pull Harvester handoff; remote batch retained" -VmNames $VMs
     }
 
-    & scp -o StrictHostKeyChecking=no $HostTemp "${PublisherHost}:$PublisherInbound" 2>$null
+    & scp @SshOptions $HostTemp "${PublisherHost}:$PublisherInbound" 2>$null
     if ($LASTEXITCODE -ne 0) {
         Fail-LmnBatch -Message "Could not push Publisher inbound batch; Harvester source retained" -VmNames $VMs
     }
@@ -144,10 +155,10 @@ try {
     Remove-Item $HostTemp -Force -ErrorAction SilentlyContinue
 
     Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Publisher inbound exists but Harvester source could not be cleared; replay remains deduplicatable" -Command {
-        ssh -o StrictHostKeyChecking=no $HarvesterHost "rm -f '$HarvesterQueue'"
+        ssh @SshOptions $HarvesterHost "rm -f '$HarvesterQueue'"
     }
 
-    & ssh -o StrictHostKeyChecking=no $PublisherHost $PublisherCommand
+    & ssh @SshOptions $PublisherHost $PublisherCommand
     $publisherExit = $LASTEXITCODE
     if ($publisherExit -ne 0) {
         Write-Host "      [WARN] Publisher reported retryable/rejected work or an unsafe queue result (exit $publisherExit)." -ForegroundColor Yellow
