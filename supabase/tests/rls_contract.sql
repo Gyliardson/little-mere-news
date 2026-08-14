@@ -62,12 +62,14 @@ end
 $$;
 reset role;
 
--- Ordinary authenticated users can read, but RLS blocks mutations.
+-- Ordinary authenticated users can read, but RLS blocks every mutation path.
 set role authenticated;
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000101', false);
 do $$
 declare
   visible_count integer;
+  affected_count integer;
+  current_title text;
 begin
   select count(*) into visible_count from public.news;
   if visible_count <> 1 then
@@ -85,6 +87,35 @@ begin
   exception
     when insufficient_privilege then null;
   end;
+
+  update public.news
+  set title_en = 'Ordinary user must not update this'
+  where source_url = 'https://example.test/public-read';
+  get diagnostics affected_count = row_count;
+  if affected_count <> 0 then
+    raise exception 'ordinary authenticated update unexpectedly affected % row(s)', affected_count;
+  end if;
+
+  select title_en into current_title
+  from public.news
+  where source_url = 'https://example.test/public-read';
+  if current_title <> 'Public read fixture' then
+    raise exception 'ordinary authenticated update changed protected content';
+  end if;
+
+  delete from public.news
+  where source_url = 'https://example.test/public-read';
+  get diagnostics affected_count = row_count;
+  if affected_count <> 0 then
+    raise exception 'ordinary authenticated delete unexpectedly affected % row(s)', affected_count;
+  end if;
+
+  select count(*) into visible_count
+  from public.news
+  where source_url = 'https://example.test/public-read';
+  if visible_count <> 1 then
+    raise exception 'ordinary authenticated delete removed protected content';
+  end if;
 
   begin
     insert into public.admin_users (user_id)
