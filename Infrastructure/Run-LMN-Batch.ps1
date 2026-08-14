@@ -3,13 +3,12 @@
 Master orchestration script for the Little Mere News batch processing architecture.
 
 .DESCRIPTION
-Starts the required Hyper-V Virtual Machines, serializes batch executions, drains
-any retained Publisher state before harvesting new work, transfers a durable inbound
-batch, and propagates every SSH/SCP/worker failure instead of reporting false success.
-Remote host identity is verified against a pre-enrolled known_hosts file, and
-Publisher secrets remain provisioned on the Publisher VM rather than being sent in
-SSH command arguments. Repository-local worker sources are resolved from this script's
-location and never from the caller's current working directory.
+Starts the required Hyper-V Virtual Machines, acquires a host-global lock keyed to
+those shared VM resources, recovers/drains Publisher-owned spool work, atomically
+claims one Harvester pending batch, and transfers it by immutable batch identity.
+No launcher unlinks the mutable Harvester pending pathname and no producer replaces
+a Publisher file that a consumer may already own. Worker/SSH/SCP failures propagate
+non-zero while recoverable claim/spool state remains durable.
 #>
 
 function Stop-LmnCluster {
@@ -24,7 +23,7 @@ function Fail-LmnBatch {
         [string[]]$VmNames
     )
     Write-Host "      [FATAL] $Message" -ForegroundColor Red
-    Write-Host "      Recoverable queue files were not intentionally deleted." -ForegroundColor Yellow
+    Write-Host "      Recoverable queue/claim files were not intentionally deleted." -ForegroundColor Yellow
     Stop-LmnCluster -Names $VmNames
     exit 1
 }
@@ -60,16 +59,66 @@ function Wait-LmnVmNetwork {
     Fail-LmnBatch -Message "VM $IpAddress did not become reachable within $TimeoutSeconds seconds" -VmNames $VmNames
 }
 
+function Invoke-PublisherDrain {
+    param(
+        [string[]]$SshOptions,
+        [string]$PublisherHost,
+        [string]$PublisherSpool,
+        [string]$PublisherRetry,
+        [string]$PublisherRejected,
+        [string]$PublisherEnvCheck
+    )
+
+    # Bounded loop prevents a malformed/external producer from causing an infinite
+    # launcher session while still draining all repository-owned queued batches.
+    for ($iteration = 0; $iteration -lt 512; $iteration++) {
+        $claimOutput = & ssh @SshOptions $PublisherHost "/home/lmnadmin/publisher-env/bin/python /home/lmnadmin/spool.py claim-next --spool '$PublisherSpool'"
+        $claimExit = $LASTEXITCODE
+        if ($claimExit -ne 0) {
+            Write-Host "      [ERROR] Publisher spool claim failed (exit $claimExit)." -ForegroundColor Red
+            return $claimExit
+        }
+
+        $publisherInput = ([string]$claimOutput).Trim()
+        $hasClaim = -not [string]::IsNullOrWhiteSpace($publisherInput)
+        if (-not $hasClaim) {
+            # A deliberately absent input pathname allows main.py to drain retry state
+            # without giving it ownership of an inbox pathname it never claimed.
+            $publisherInput = "$PublisherSpool/processing/__no_inbound__.json"
+        }
+
+        $publisherCommand = "$PublisherEnvCheck && export LMN_INPUT_FILE='$publisherInput' && export LMN_RETRY_FILE='$PublisherRetry' && export LMN_REJECTED_FILE='$PublisherRejected' && /home/lmnadmin/publisher-env/bin/python /home/lmnadmin/main.py"
+        & ssh @SshOptions $PublisherHost $publisherCommand
+        $publisherExit = $LASTEXITCODE
+        if ($publisherExit -ne 0) {
+            return $publisherExit
+        }
+
+        if (-not $hasClaim) {
+            return 0
+        }
+    }
+
+    Write-Host "      [ERROR] Publisher spool exceeded the bounded 512-batch drain budget." -ForegroundColor Red
+    return 1
+}
+
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 $HarvesterFeedsSource = Join-Path $ProjectRoot "Backend-Harvester\feeds.json"
 $HarvesterCodeSource = Join-Path $ProjectRoot "Backend-Harvester\main.py"
+$HarvesterClaimSource = Join-Path $ProjectRoot "Backend-Harvester\queue_claim.py"
 $PublisherCodeSource = Join-Path $ProjectRoot "Backend-Publisher\main.py"
-$HostTemp = Join-Path $ProjectRoot "news_to_publish_temp.json"
+$PublisherSpoolSource = Join-Path $ProjectRoot "Backend-Publisher\spool.py"
+$HostLockHelperSource = Join-Path $PSScriptRoot "Lmn-HostLock.ps1"
+$HostTemp = Join-Path ([System.IO.Path]::GetTempPath()) ("lmn-handoff-{0}.json" -f [guid]::NewGuid().ToString("N"))
 
 $RequiredLocalSources = @(
     $HarvesterFeedsSource,
     $HarvesterCodeSource,
-    $PublisherCodeSource
+    $HarvesterClaimSource,
+    $PublisherCodeSource,
+    $PublisherSpoolSource,
+    $HostLockHelperSource
 )
 foreach ($sourcePath in $RequiredLocalSources) {
     if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
@@ -79,16 +128,25 @@ foreach ($sourcePath in $RequiredLocalSources) {
     }
 }
 
-$lockPath = Join-Path $ProjectRoot "lmn-batch.lock"
+. $HostLockHelperSource
+
+$VMs = "LMN-Harvester", "LMN-Brain", "LMN-Publisher"
+$SharedResourceIds = @(
+    "hyperv:LMN-Harvester",
+    "hyperv:LMN-Brain",
+    "hyperv:LMN-Publisher",
+    "ssh:10.0.100.10",
+    "ssh:10.0.100.20",
+    "ssh:10.0.100.30"
+)
+$batchLock = $null
 try {
-    $batchLock = [System.IO.File]::Open(
-        $lockPath,
-        [System.IO.FileMode]::OpenOrCreate,
-        [System.IO.FileAccess]::ReadWrite,
-        [System.IO.FileShare]::None
-    )
+    # The lock lives under host-global CommonApplicationData and is keyed only by the
+    # shared VM/resource identity. Two clones/worktrees on this Windows host therefore
+    # contend for exactly the same lock instead of each owning a repository-local file.
+    $batchLock = Enter-LmnHostLock -ResourceIds $SharedResourceIds
 } catch {
-    Write-Host "[ERROR] Another Little Mere News batch execution already owns the orchestration lock." -ForegroundColor Red
+    Write-Host "[ERROR] Could not acquire the Little Mere News shared-resource lock: $($_.Exception.Message)" -ForegroundColor Red
     exit 1
 }
 
@@ -121,11 +179,11 @@ try {
         "-o", "BatchMode=yes"
     )
 
-    $VMs = "LMN-Harvester", "LMN-Brain", "LMN-Publisher"
     $HarvesterHost = "lmnadmin@10.0.100.10"
     $PublisherHost = "lmnadmin@10.0.100.30"
-    $HarvesterQueue = "/home/lmnadmin/news_to_publish.json"
-    $PublisherInbound = "/home/lmnadmin/news_to_publish.inbound.json"
+    $HarvesterPending = "/home/lmnadmin/news_to_publish.json"
+    $PublisherSpool = "/home/lmnadmin/.local/state/lmn/publisher-spool"
+    $PublisherStageDir = "/home/lmnadmin/.local/state/lmn/publisher-staging"
     $PublisherRetry = "/home/lmnadmin/news_to_publish.retry.json"
     $PublisherRejected = "/home/lmnadmin/news_to_publish.rejected.json"
     $PublisherEnvFile = "/home/lmnadmin/.config/lmn/publisher.env"
@@ -134,7 +192,6 @@ try {
     # Secret values are expanded only by the remote shell and are never interpolated
     # into this local SSH command string.
     $PublisherEnvCheck = "test -r '$PublisherEnvFile' && set -a && . '$PublisherEnvFile' && set +a && test -n `"`$SUPABASE_URL`" && test -n `"`$SUPABASE_KEY`""
-    $PublisherCommand = "$PublisherEnvCheck && export LMN_INPUT_FILE='$PublisherInbound' && export LMN_RETRY_FILE='$PublisherRetry' && export LMN_REJECTED_FILE='$PublisherRejected' && /home/lmnadmin/publisher-env/bin/python /home/lmnadmin/main.py"
 
     Write-Host "=========================================" -ForegroundColor Cyan
     Write-Host " LMN BATCH PROCESSOR - INITIALIZING      " -ForegroundColor Cyan
@@ -151,7 +208,7 @@ try {
     Write-Host "      Waiting for services (SSH, Ollama) to initialize (15s)..." -ForegroundColor DarkGray
     Start-Sleep -Seconds 15
 
-    Write-Host "[2/6] Verifying trusted SSH endpoints and transferring Python logic..." -ForegroundColor Yellow
+    Write-Host "[2/6] Verifying trusted SSH endpoints and transferring worker/ownership logic..." -ForegroundColor Yellow
     Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Publisher server-side environment is missing or incomplete" -Command {
         ssh @SshOptions $PublisherHost $PublisherEnvCheck
     }
@@ -161,54 +218,86 @@ try {
     Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Could not transfer Harvester code" -Command {
         scp @SshOptions $HarvesterCodeSource "${HarvesterHost}:/home/lmnadmin/main.py" | Out-Null
     }
+    Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Could not transfer Harvester claim helper" -Command {
+        scp @SshOptions $HarvesterClaimSource "${HarvesterHost}:/home/lmnadmin/queue_claim.py" | Out-Null
+    }
     Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Could not transfer Publisher code" -Command {
         scp @SshOptions $PublisherCodeSource "${PublisherHost}:/home/lmnadmin/main.py" | Out-Null
     }
+    Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Could not transfer Publisher spool helper" -Command {
+        scp @SshOptions $PublisherSpoolSource "${PublisherHost}:/home/lmnadmin/spool.py" | Out-Null
+    }
+    Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Could not initialize Publisher spool directories" -Command {
+        ssh @SshOptions $PublisherHost "mkdir -p '$PublisherSpool/inbox' '$PublisherSpool/processing' '$PublisherStageDir'"
+    }
 
-    Write-Host "[3/6] Draining retained Publisher inbound/retry state before harvesting new work..." -ForegroundColor Yellow
-    & ssh @SshOptions $PublisherHost $PublisherCommand
-    $preflightExit = $LASTEXITCODE
+    Write-Host "[3/6] Recovering/draining retained Publisher processing, inbox and retry state..." -ForegroundColor Yellow
+    $preflightExit = Invoke-PublisherDrain -SshOptions $SshOptions -PublisherHost $PublisherHost -PublisherSpool $PublisherSpool -PublisherRetry $PublisherRetry -PublisherRejected $PublisherRejected -PublisherEnvCheck $PublisherEnvCheck
     if ($preflightExit -ne 0) {
         Write-Host "      [WARN] Publisher reported retained/rejected work or an unsafe queue result (exit $preflightExit)." -ForegroundColor Yellow
-        Write-Host "      No new Harvester batch will be created or transferred this run; inspect Publisher retry/quarantine state." -ForegroundColor Yellow
+        Write-Host "      No new Harvester batch will be created this run; claimed/spooled work remains recoverable." -ForegroundColor Yellow
         Stop-LmnCluster -Names $VMs
         exit $preflightExit
     }
 
     Write-Host "[4/6] Triggering LMN-Harvester (Data Collection & AI Processing)..." -ForegroundColor Yellow
-    Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Harvester failed; existing handoff remains recoverable" -Command {
+    Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Harvester failed; existing ownership state remains recoverable" -Command {
         ssh @SshOptions $HarvesterHost "/home/lmnadmin/harvester-env/bin/python /home/lmnadmin/main.py"
     }
-    Write-Host "      Harvester completed and durable handoff state is ready." -ForegroundColor Green
+    Write-Host "      Harvester completed and pending state is durable." -ForegroundColor Green
 
-    Write-Host "[5/6] Transferring new inbound batch and triggering LMN-Publisher..." -ForegroundColor Yellow
+    Write-Host "[5/6] Claiming one Harvester batch and enqueuing immutable Publisher work..." -ForegroundColor Yellow
     Remove-Item $HostTemp -Force -ErrorAction SilentlyContinue
 
-    & scp @SshOptions "${HarvesterHost}:$HarvesterQueue" $HostTemp 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Fail-LmnBatch -Message "Could not pull Harvester handoff; remote batch retained" -VmNames $VMs
+    $claimOutput = & ssh @SshOptions $HarvesterHost "/home/lmnadmin/harvester-env/bin/python /home/lmnadmin/queue_claim.py claim --pending '$HarvesterPending'"
+    $claimExit = $LASTEXITCODE
+    if ($claimExit -ne 0) {
+        Fail-LmnBatch -Message "Could not claim Harvester pending state" -VmNames $VMs
     }
+    $HarvesterClaim = ([string]$claimOutput).Trim()
 
-    & scp @SshOptions $HostTemp "${PublisherHost}:$PublisherInbound" 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        Fail-LmnBatch -Message "Could not push Publisher inbound batch; Harvester source retained" -VmNames $VMs
+    if (-not [string]::IsNullOrWhiteSpace($HarvesterClaim)) {
+        $BatchId = [System.IO.Path]::GetFileNameWithoutExtension($HarvesterClaim)
+        if ($BatchId -notmatch '^batch-[0-9a-f]{32}$') {
+            Fail-LmnBatch -Message "Harvester returned an invalid batch identity" -VmNames $VMs
+        }
+
+        & scp @SshOptions "${HarvesterHost}:$HarvesterClaim" $HostTemp 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Fail-LmnBatch -Message "Could not pull claimed Harvester batch; exact remote claim retained" -VmNames $VMs
+        }
+
+        $PublisherStaging = "$PublisherStageDir/$BatchId-$([guid]::NewGuid().ToString('N')).json"
+        & scp @SshOptions $HostTemp "${PublisherHost}:$PublisherStaging" 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            Fail-LmnBatch -Message "Could not stage Publisher batch; Harvester claim retained" -VmNames $VMs
+        }
+
+        & ssh @SshOptions $PublisherHost "/home/lmnadmin/publisher-env/bin/python /home/lmnadmin/spool.py enqueue --staging '$PublisherStaging' --spool '$PublisherSpool' --batch-id '$BatchId'"
+        if ($LASTEXITCODE -ne 0) {
+            Fail-LmnBatch -Message "Could not publish staged batch into immutable Publisher inbox; Harvester claim retained" -VmNames $VMs
+        }
+
+        # Acknowledge only the exact claim after Publisher spool ownership is durable.
+        # A newer Harvester pending file, if any, has a different pathname and survives.
+        Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Publisher owns batch but exact Harvester claim could not be acknowledged; replay is idempotent" -Command {
+            ssh @SshOptions $HarvesterHost "/home/lmnadmin/harvester-env/bin/python /home/lmnadmin/queue_claim.py complete --pending '$HarvesterPending' --batch-id '$BatchId'"
+        }
+        Write-Host "      Batch $BatchId transferred into immutable Publisher spool ownership." -ForegroundColor Green
+    } else {
+        Write-Host "      No Harvester pending batch required transfer." -ForegroundColor DarkGray
     }
 
     Remove-Item $HostTemp -Force -ErrorAction SilentlyContinue
 
-    Invoke-CheckedExternal -VmNames $VMs -FailureMessage "Publisher inbound exists but Harvester source could not be cleared; replay remains deduplicatable" -Command {
-        ssh @SshOptions $HarvesterHost "rm -f '$HarvesterQueue'"
-    }
-
-    & ssh @SshOptions $PublisherHost $PublisherCommand
-    $publisherExit = $LASTEXITCODE
+    $publisherExit = Invoke-PublisherDrain -SshOptions $SshOptions -PublisherHost $PublisherHost -PublisherSpool $PublisherSpool -PublisherRetry $PublisherRetry -PublisherRejected $PublisherRejected -PublisherEnvCheck $PublisherEnvCheck
     if ($publisherExit -ne 0) {
         Write-Host "      [WARN] Publisher reported retryable/rejected work or an unsafe queue result (exit $publisherExit)." -ForegroundColor Yellow
-        Write-Host "      Durable retry/quarantine state has been preserved; inspect it before treating the batch as successful." -ForegroundColor Yellow
+        Write-Host "      Processing/inbox/retry/quarantine ownership remains durable for inspection/recovery." -ForegroundColor Yellow
         Stop-LmnCluster -Names $VMs
         exit $publisherExit
     }
-    Write-Host "      Publisher drained the current inbound/retry workload successfully." -ForegroundColor Green
+    Write-Host "      Publisher drained all currently claimed/inbox/retry workload successfully." -ForegroundColor Green
 
     Write-Host "[6/6] Shutting down VM cluster to conserve resources..." -ForegroundColor Yellow
     Stop-LmnCluster -Names $VMs
@@ -218,6 +307,7 @@ try {
     Write-Host "=========================================" -ForegroundColor Cyan
     exit 0
 } finally {
+    Remove-Item $HostTemp -Force -ErrorAction SilentlyContinue
     if ($null -ne $batchLock) {
         $batchLock.Dispose()
     }
