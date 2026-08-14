@@ -8,7 +8,8 @@
       1. Runs the Hyper-V infrastructure provisioning (Setup-LMN-Infrastructure.ps1)
       2. Creates a Desktop shortcut for the Batch Processor with the project icon
 
-    Designed to be a one-click experience for any new user of the project.
+    This is a single entrypoint for the optional Hyper-V topology. Real provisioning
+    requires the trusted Ubuntu ISO digest described in Infrastructure/README.md.
 
 .PARAMETER DryRun
     Simulates Phase 1 (infrastructure) without making changes.
@@ -98,7 +99,7 @@ function Invoke-InfrastructureSetup {
         Start-Sleep -Milliseconds 400
         Write-StepInfo "SIM" "Would create Internal Virtual Switch 'LMN-Internal-Switch'."
         Start-Sleep -Milliseconds 400
-        Write-StepInfo "SIM" "Would download Ubuntu Server 24.04 LTS ISO (~2.6 GB)."
+        Write-StepInfo "SIM" "Would verify/download the configured Ubuntu Server 24.04 LTS ISO (~3.2 GB for the reviewed default)."
         Start-Sleep -Milliseconds 400
         Write-StepInfo "SIM" "Would provision 3 Gen2 VMs: LMN-Harvester, LMN-Brain, LMN-Publisher."
         Start-Sleep -Milliseconds 400

@@ -25,19 +25,29 @@
 
 $ErrorActionPreference = "Stop"
 
-# Base paths
-$ProjectRoot   = "C:\Arquivos\GitHub\Projetos\Little Mere News"
-$InfraRoot     = Join-Path $ProjectRoot "Infrastructure"
+# Base paths are derived from this script so the repository can live anywhere.
+$InfraRoot     = $PSScriptRoot
+$ProjectRoot   = Split-Path $InfraRoot -Parent
 $VMStoragePath = Join-Path $InfraRoot "VMs"
 $ISOPath       = Join-Path $InfraRoot "ISO"
 
 # Network configuration
 $SwitchName = "LMN-Internal-Switch"
 
-# Ubuntu Server 24.04 LTS ISO
-$ISOUrl      = "https://releases.ubuntu.com/24.04/ubuntu-24.04.2-live-server-amd64.iso"
-$ISOFileName = "ubuntu-24.04-server.iso"
+# Ubuntu Server 24.04 LTS ISO. Keep the default explicit and review it when
+# Canonical advances the 24.04 point release; callers may override without source edits.
+$ISOUrl = if ($env:LMN_UBUNTU_ISO_URL) {
+    $env:LMN_UBUNTU_ISO_URL.Trim()
+} else {
+    "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso"
+}
+$ISOFileName = "ubuntu-24.04-live-server-amd64.iso"
 $ISOFullPath = Join-Path $ISOPath $ISOFileName
+$ExpectedISOSha256 = if ($env:LMN_UBUNTU_ISO_SHA256) {
+    $env:LMN_UBUNTU_ISO_SHA256.Trim().ToLowerInvariant()
+} else {
+    ""
+}
 
 # VM Definitions
 $VMDefinitions = @(
@@ -102,6 +112,40 @@ function Confirm-Action {
     param([string]$Prompt)
     $response = Read-Host "$Prompt (Y/N)"
     return ($response -eq 'Y' -or $response -eq 'y' -or $response -eq 'Yes' -or $response -eq 'yes')
+}
+
+function Assert-LmnIsoDigestConfiguration {
+    if ($ExpectedISOSha256 -notmatch '^[0-9a-f]{64}$') {
+        Write-Fail "LMN_UBUNTU_ISO_SHA256 must contain the trusted 64-character SHA-256 digest for the configured Ubuntu ISO."
+        Write-Host "  Obtain the digest from Ubuntu's official release manifest through a trusted channel, set the environment variable, and retry." -ForegroundColor Yellow
+        Write-Host "  A SHA-256 digest verifies image integrity; it is not an independent signature of the release origin." -ForegroundColor DarkGray
+        exit 1
+    }
+
+    $parsedIsoUri = $null
+    if (-not [Uri]::TryCreate($ISOUrl, [UriKind]::Absolute, [ref]$parsedIsoUri) -or $parsedIsoUri.Scheme -ne "https") {
+        Write-Fail "LMN_UBUNTU_ISO_URL must be an absolute HTTPS URL."
+        exit 1
+    }
+}
+
+function Assert-LmnIsoIntegrity {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        Write-Fail "ISO file was not found for integrity verification: $Path"
+        exit 1
+    }
+
+    $actualDigest = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualDigest -ne $ExpectedISOSha256) {
+        Write-Fail "Ubuntu ISO SHA-256 mismatch. Refusing to use unverified boot media."
+        Write-Host "  Expected: $ExpectedISOSha256" -ForegroundColor DarkGray
+        Write-Host "  Actual:   $actualDigest" -ForegroundColor DarkGray
+        exit 1
+    }
+
+    Write-Success "Ubuntu ISO SHA-256 verified."
 }
 
 # ============================================================================
@@ -208,6 +252,7 @@ function Invoke-NetworkSetup {
 
 function Invoke-ISODownload {
     Write-Header "STAGE 2B: Ubuntu Server 24.04 LTS ISO"
+    Assert-LmnIsoDigestConfiguration
 
     # Create ISO directory if missing
     if (-not (Test-Path $ISOPath)) {
@@ -215,31 +260,18 @@ function Invoke-ISODownload {
         Write-Step "ISO directory created: $ISOPath"
     }
 
-    # Check if ISO exists
-    if (Test-Path $ISOFullPath) {
+    # Existing media is reusable only after cryptographic integrity verification.
+    if (Test-Path -LiteralPath $ISOFullPath -PathType Leaf) {
         $fileSize = (Get-Item $ISOFullPath).Length
         $fileSizeGB = [math]::Round($fileSize / 1GB, 2)
         Write-Skip "ISO already exists: $ISOFullPath ($fileSizeGB GB)"
-
-        # Check for partial download (< 1 GB)
-        if ($fileSize -lt 1GB) {
-            Write-Host "  WARNING: The ISO file appears incomplete (< 1 GB)." -ForegroundColor Yellow
-            if (Confirm-Action "  Do you want to re-download it?") {
-                Remove-Item $ISOFullPath -Force
-            }
-            else {
-                return
-            }
-        }
-        else {
-            return
-        }
+        Assert-LmnIsoIntegrity -Path $ISOFullPath
+        return
     }
 
     Write-Step "Initiating Ubuntu Server 24.04 LTS ISO download..."
     Write-Host "  URL: $ISOUrl" -ForegroundColor DarkGray
     Write-Host "  Target: $ISOFullPath" -ForegroundColor DarkGray
-    Write-Host "  Estimated Size: ~2.6 GB" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Download may take several minutes depending on network bandwidth." -ForegroundColor DarkGray
     Write-Host ""
@@ -258,22 +290,22 @@ function Invoke-ISODownload {
             Invoke-WebRequest -Uri $ISOUrl -OutFile $ISOFullPath -UseBasicParsing
         }
 
+        Assert-LmnIsoIntegrity -Path $ISOFullPath
         $downloadedSize = (Get-Item $ISOFullPath).Length
         $downloadedSizeGB = [math]::Round($downloadedSize / 1GB, 2)
-        Write-Success "Download complete: $ISOFullPath ($downloadedSizeGB GB)"
+        Write-Success "Download complete and verified: $ISOFullPath ($downloadedSizeGB GB)"
     }
     catch {
-        Write-Fail "ISO Download failed: $($_.Exception.Message)"
+        Remove-Item $ISOFullPath -Force -ErrorAction SilentlyContinue
+        Write-Fail "ISO download or verification failed: $($_.Exception.Message)"
         Write-Host ""
-        Write-Host "  Manual workaround:" -ForegroundColor Yellow
-        Write-Host "  1. Download the ISO from: https://ubuntu.com/download/server" -ForegroundColor White
-        Write-Host "  2. Save it to: $ISOFullPath" -ForegroundColor White
-        Write-Host "  3. Re-execute this script." -ForegroundColor White
+        Write-Host "  Manual recovery:" -ForegroundColor Yellow
+        Write-Host "  1. Download the exact configured Ubuntu ISO through a trusted channel." -ForegroundColor White
+        Write-Host "  2. Verify its SHA-256 against Ubuntu's official release manifest." -ForegroundColor White
+        Write-Host "  3. Save it to: $ISOFullPath" -ForegroundColor White
+        Write-Host "  4. Set LMN_UBUNTU_ISO_SHA256 to that trusted digest and re-execute this script." -ForegroundColor White
         Write-Host ""
-
-        if (-not (Confirm-Action "  Proceed without ISO? (VMs will be created without boot media)")) {
-            exit 1
-        }
+        exit 1
     }
 }
 
@@ -384,7 +416,7 @@ function New-LMNVM {
 function Invoke-VMProvisioning {
     Write-Header "STAGE 2C: Virtual Machine Provisioning"
 
-    # Create VM storage directory
+    # Create VM storage directory if missing
     if (-not (Test-Path $VMStoragePath)) {
         New-Item -Path $VMStoragePath -ItemType Directory -Force | Out-Null
         Write-Step "VM storage directory created: $VMStoragePath"
@@ -482,6 +514,9 @@ if (-not $canProceed) {
     exit 0
 }
 
+# Validate trusted ISO configuration before mutating Stage 2 network/VM state.
+Assert-LmnIsoDigestConfiguration
+
 # Stage 2: Network, ISO, and VM Provisioning
 Invoke-NetworkSetup
 Invoke-ISODownload
@@ -490,5 +525,5 @@ Invoke-VMProvisioning
 # Report
 Show-FinalReport
 
-Write-Host "  Infrastructure provisioning completed successfully." -ForegroundColor Green
+Write-Host "  Infrastructure provisioning completed successfully."
 Write-Host ""
