@@ -1,22 +1,22 @@
 # Deployment and clean-room runtime contract
 
-Little Mere News is a hybrid system. The frontend, PostgreSQL/Supabase database, Python jobs and optional local AI runtime are separate components with different deployment boundaries.
+Little Mere News is a hybrid system. The Next.js portal, Supabase/PostgreSQL, Python jobs and optional local AI/Hyper-V infrastructure are separate runtime boundaries. Critical CI deliberately does not require production credentials, live feeds, GPU, Ollama or the original home-lab topology.
 
 ## Component map
 
 ### Next.js portal/CMS
 
-Runs as a normal production Next.js application.
+The frontend is a normal production Next.js application.
 
-Required runtime configuration:
+Required configuration is documented in `frontend-web/.env.example`. Important variables include:
 
-- `NEXT_PUBLIC_SITE_URL`
-- `NEXT_PUBLIC_SUPABASE_URL`
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-- `SUPABASE_SERVICE_ROLE_KEY` as a server-only secret where privileged server code requires it
-- `ADMIN_PHANTOM_PATH` as optional URL obscurity only
+- `NEXT_PUBLIC_SITE_URL`;
+- `NEXT_PUBLIC_SUPABASE_URL`;
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`;
+- `SUPABASE_SERVICE_ROLE_KEY` only for trusted server-side code that needs it;
+- `ADMIN_PHANTOM_PATH`, which is URL obscurity only and **not** authentication or authorization.
 
-Build/start contract:
+Clean build/start:
 
 ```bash
 cd frontend-web
@@ -29,188 +29,181 @@ npm run build
 npm run start -- -H 0.0.0.0 -p 3000
 ```
 
-`GET /api/health` is a liveness check for the Next.js application process. It is intentionally not a readiness claim for Supabase, the Python services, Ollama or external sources.
+`GET /api/health` proves Next.js process liveness only. It is not a readiness assertion for Supabase, Python jobs, Ollama or external feeds.
 
 ### Supabase/PostgreSQL
 
-Database state is versioned under `supabase/migrations/`.
+Versioned database state is under `supabase/migrations/`. For a new environment:
 
-For a new environment:
-
-1. provision a compatible PostgreSQL/Supabase database;
+1. provision compatible PostgreSQL/Supabase;
 2. apply migrations in filename order;
-3. verify the RLS/security contract;
-4. create the intended Supabase Auth user through the normal trusted authentication/admin path;
+3. run/verify the RLS contract;
+4. create the intended Supabase Auth account through a trusted path;
 5. add that authenticated UUID to `public.admin_users` through a trusted server/database administrative channel.
 
-Do not expose a browser self-enrollment path for administrator membership.
-
-Production migrations should always be reviewed against existing data before being applied. The uniqueness contract for `news.source_url` intentionally does not delete conflicting production data silently.
+There is no browser self-enrollment path for administrator membership. Production migrations must be reviewed against existing production data before application.
 
 ### Harvester
 
-`Backend-Harvester/` consumes configured external feeds, normalizes source data and optionally calls the configured local AI provider boundary.
+`Backend-Harvester/` loads configured external feeds, normalizes untrusted content and optionally invokes the local AI provider boundary.
 
-Runtime configuration used by the worker includes:
+Important runtime variables:
 
-- `LMN_FEEDS_FILE` — feed configuration JSON path; default `/home/lmnadmin/feeds.json`;
-- `LMN_OUTPUT_FILE` — Harvester-owned pending handoff file; default `/home/lmnadmin/news_to_publish.json`;
-- `OLLAMA_API_URL` — optional local/provider endpoint;
-- `OLLAMA_MODEL` — provider model name.
+- `LMN_FEEDS_FILE` — feed configuration path;
+- `LMN_OUTPUT_FILE` — **Harvester-owned mutable pending pathname**;
+- `OLLAMA_API_URL` — optional provider endpoint;
+- `OLLAMA_MODEL` — provider model identifier.
 
-The Harvester output is **pending/untransferred state**, not a disposable scratch file. A new run merges validated articles with any previous untransferred batch under an advisory file lock and deduplicates by `source_url`. If existing pending state is malformed, the worker fails non-zero rather than replacing it. This makes an interrupted transfer recoverable and prevents a later harvest from silently discarding the previous batch.
+The Harvester merges new validated articles with existing pending work under an advisory file lock and atomically replaces the pending file only while it still owns that pending pathname. Malformed existing pending state fails closed.
 
-A portable host should set explicit paths/endpoints appropriate to that environment instead of relying on the original `/home/lmnadmin` or private-network defaults. Critical CI does not require live feeds, Ollama or GPU resources; deterministic fixtures cover the important failure modes.
+The Hyper-V launcher does **not** snapshot this mutable file and later delete it. `Backend-Harvester/queue_claim.py` participates in the same pending lock and atomically renames the current pending file into an immutable `.lmn-harvester-claims/batch-<uuid>.json` claim. New Harvester writes then create/merge a fresh pending file. Acknowledgement removes only the exact old claim.
 
-External sources are mutable and untrusted. A deployed Harvester should be treated as a job/worker with observable failures, bounded network behavior and retry policy rather than as part of frontend process health.
+If a launcher dies after claim, the next claim operation recovers the pre-existing claim before creating another one.
 
 ### Publisher
 
-`Backend-Publisher/` consumes validated inbound items and persists them to Supabase/PostgreSQL with idempotency and bounded retry behavior.
+`Backend-Publisher/main.py` validates articles and persists them to Supabase/PostgreSQL. Runtime credentials remain server-side:
 
-Runtime configuration:
+- `SUPABASE_URL`;
+- `SUPABASE_KEY`;
+- `LMN_INPUT_FILE` — the **exact input file already claimed for this Publisher invocation**;
+- `LMN_RETRY_FILE` — Publisher-owned retained transient failures;
+- `LMN_REJECTED_FILE` — Publisher-owned quarantine.
 
-- `SUPABASE_URL` — Supabase project/API URL for the server-side job;
-- `SUPABASE_KEY` — privileged server/job credential; never expose it to browser code, public environment variables or logs;
-- `LMN_INPUT_FILE` — new inbound batch owned by the transfer/orchestration boundary; default `/home/lmnadmin/news_to_publish.inbound.json`;
-- `LMN_RETRY_FILE` — Publisher-owned retained **transient** failures; default `/home/lmnadmin/news_to_publish.retry.json`;
-- `LMN_REJECTED_FILE` — durable quarantine for invalid payloads and non-transient/permanent publication failures; default `/home/lmnadmin/news_to_publish.rejected.json`.
+`LMN_INPUT_FILE`, retry and quarantine paths must be distinct. `main.py` removes only the exact `LMN_INPUT_FILE` it was given after persisting its next retry/quarantine state.
 
-These three Publisher paths must be distinct. The Publisher rejects a configuration that aliases inbound, retry and quarantine ownership. In particular, **do not configure the Harvester output and Publisher retry file to the same path**.
+Concurrent/overlapping producers must therefore **not** repeatedly replace a shared `LMN_INPUT_FILE`. The repository-provided concurrent boundary is `Backend-Publisher/spool.py`.
 
-At the beginning of a publish run, retained retry work and the new inbound batch are merged deterministically by `source_url`. Network/time-out failures receive the bounded retry policy and remain in `LMN_RETRY_FILE` only when they are still retryable after those attempts. Invalid payloads and non-transport failures are moved to `LMN_REJECTED_FILE` rather than being retried indefinitely. Exception details are logged only by type; the quarantine persists the payload, not raw exception text that could contain sensitive provider details.
+#### Immutable Publisher spool
 
-The Publisher persists its next retry state and rejected state before relinquishing the inbound file. If the process crashes after a successful database write but before relinquishing inbound state, the database `UNIQUE (source_url)` / idempotent upsert contract makes the replay a safe duplicate no-op rather than data loss.
+The Hyper-V path uses a spool with:
 
-A Publisher run exits non-zero when it creates new retryable or quarantine work, or when queue/result state cannot be handled safely. This makes partial failure visible to orchestration. Quarantined items are not active input: a later run with no inbound/retry work succeeds without repeatedly submitting permanent failures. Automation must not report the original partially unsuccessful run as green merely because its rejected state was persisted safely.
+- `inbox/batch-<uuid>.json` — complete immutable queued batches;
+- `processing/batch-<uuid>.json` — the exact batch atomically claimed by the consumer.
 
-### Durable handoff ownership
+Producer flow:
 
-The file handoff intentionally separates four ownership states:
+`unique staging file → validate JSON → fsync temp → atomic non-overwriting inbox publish`
 
-1. **Harvester pending** — `LMN_OUTPUT_FILE`, which survives until transfer is confirmed.
-2. **Publisher inbound** — `LMN_INPUT_FILE`, a newly transferred batch.
-3. **Publisher retry** — `LMN_RETRY_FILE`, transient failures retained independently across future inbound batches.
-4. **Publisher rejected** — `LMN_REJECTED_FILE`, quarantine for invalid or permanent failures that must not be retried automatically.
+Consumer flow:
 
-For a same-host deployment, use four distinct files in one directory, for example:
+`existing processing recovery OR inbox → atomic rename → processing → Publisher main.py`
 
-```bash
-export LMN_OUTPUT_FILE=/tmp/lmn/harvester.pending.json
-export LMN_INPUT_FILE=/tmp/lmn/publisher.inbound.json
-export LMN_RETRY_FILE=/tmp/lmn/publisher.retry.json
-export LMN_REJECTED_FILE=/tmp/lmn/publisher.rejected.json
-```
+A producer can enqueue B while A is processing. A's cleanup targets `processing/A` and cannot remove `inbox/B`.
 
-A same-path `LMN_OUTPUT_FILE == LMN_INPUT_FILE` configuration is no longer the recommended portable contract because it makes overlapping worker ownership ambiguous. The safe topology uses a transfer/claim step between Harvester pending and Publisher inbound. The Hyper-V orchestrator implements that ownership transfer explicitly.
+A crash during staging/write does not expose a partial final inbox batch. A crash after `inbox → processing` leaves processing state discoverable and recoverable. Replaying an identical batch id while it is still present is idempotent; replay after an ambiguous database write converges through the database `UNIQUE (source_url)`/upsert contract.
 
-### Optional Ollama/local AI
+`LMN_RETRY_FILE` remains separate from spool batch files. Current retry classification is intentionally narrow until the dedicated retry-taxonomy work is complete; do not interpret this document as claiming that every provider-side transient HTTP condition is already classified optimally.
 
-Ollama is optional runtime infrastructure used behind the Harvester AI-provider boundary. Critical CI and clean-room browser/database gates do not depend on a real model, GPU or stochastic model output.
+### Durable handoff lifecycle
 
-A deployment without Ollama can still build/test the repository; live ingestion that requires AI processing must provide the configured provider or handle its documented unavailable/fallback behavior.
+The supported Hyper-V lifecycle is:
 
-### Optional Hyper-V topology
+`CREATED → Harvester pending → Harvester CLAIMED → Publisher QUEUED → Publisher CLAIMED/PROCESSING → PUBLISHED or RETRY/QUARANTINED`
 
-`Infrastructure/Run-LMN-Batch.ps1` preserves the original Windows/Hyper-V topology while enforcing the durable ownership protocol and a strict SSH trust boundary.
+Cleanup is identity-specific. A valid batch must not transition to silent disappearance merely because newer work arrived at a formerly shared pathname.
 
-#### SSH host identity
+Crash/restart semantics:
 
-The orchestrator uses `StrictHostKeyChecking=yes`, `BatchMode=yes` and an explicit `known_hosts` file. By default it uses the current account's standard `~/.ssh/known_hosts`; set `LMN_KNOWN_HOSTS_FILE` to an alternate file when the batch host uses a dedicated trust store. The file must already exist before a batch starts.
+- before Harvester claim: pending remains pending;
+- after Harvester claim: immutable claim is recovered first;
+- during SCP to Publisher staging: Harvester claim remains and staging is not consumer-visible;
+- during Publisher spool publication: incomplete dot-temp state is ignored and the source claim remains replayable;
+- after Publisher enqueue but before Harvester acknowledgement: the exact batch id is replayed safely;
+- after Publisher processing claim: processing file is recovered before new inbox work;
+- after successful DB write but before processing-file cleanup: replay converges via `source_url` idempotency.
 
-Enroll the Harvester (`10.0.100.10`) and Publisher (`10.0.100.30`) host keys only after comparing their fingerprints through a trusted channel, such as the VM console or a separately authenticated administrative path. `ssh-keyscan` can collect candidate public host keys, but **do not treat `ssh-keyscan` output obtained over the same untrusted network as proof of server identity**. One safe workflow is to collect candidate keys, inspect their fingerprints with `ssh-keygen -lf`, compare those fingerprints with the VM console, and only then append the verified keys to the configured `known_hosts` file.
+See [`publisher-queue-ownership.md`](publisher-queue-ownership.md) for the detailed invariants and deterministic interleaving tests.
 
-Because `BatchMode=yes` disables interactive password/host-key prompts, the orchestration account must also have non-interactive SSH authentication configured beforehand. Unknown or changed host keys fail closed rather than being silently accepted.
+## Optional Hyper-V topology
 
-#### Publisher secret provisioning
+`Infrastructure/Run-LMN-Batch.ps1` preserves the Windows/Hyper-V deployment option while enforcing the queue ownership protocol.
 
-The Hyper-V orchestrator no longer reads or sends `SUPABASE_URL` / `SUPABASE_KEY` from the Windows host command line. Provision these values directly on the trusted Publisher VM in the shell-compatible file:
+### Host-global launcher serialization
+
+The launcher uses `Infrastructure/Lmn-HostLock.ps1`. Its lock key is derived from the shared VM/IP resource identities and, by default, is stored below Windows `CommonApplicationData` (`ProgramData`) rather than below the repository checkout.
+
+Two clones/worktrees on the **same Windows host** targeting the same LMN VM/IP resources therefore contend for the same operating-system exclusive file lock. The correctness tests start two independent `pwsh` processes from different checkout directories and force this contention.
+
+The host-global lock is an outer orchestration guard. Queue safety does not rely on it alone: Harvester claim and Publisher spool ownership remain explicit and recoverable on the remote VMs.
+
+This does not claim cross-host distributed locking. If multiple physical Windows hosts are ever allowed to control the same VM/storage resources, that topology needs a shared/remote coordination boundary rather than assuming the single-host ProgramData lock is global across machines.
+
+### SSH host identity
+
+The launcher uses strict host-key verification, batch mode and an explicit `known_hosts` file. VM host keys must be enrolled only after fingerprint verification through a trusted channel. Unknown/changed host keys fail closed.
+
+### Publisher secrets
+
+The launcher does not interpolate `SUPABASE_URL` or `SUPABASE_KEY` from the Windows host command line. Provision them on the trusted Publisher VM in:
 
 `/home/lmnadmin/.config/lmn/publisher.env`
 
-For example, from a trusted Publisher console/admin session, create the directory/file without placing real values in shell history where possible, then enforce owner-only permissions:
+Use owner-only directory/file permissions and never commit the values. The launcher verifies the file/variables exist without printing secret values.
 
-```bash
-mkdir -p /home/lmnadmin/.config/lmn
-chmod 700 /home/lmnadmin/.config/lmn
-chmod 600 /home/lmnadmin/.config/lmn/publisher.env
-```
+### Worker transfer and dependency bootstrap
 
-The file must define non-empty `SUPABASE_URL` and `SUPABASE_KEY` values. It is an external deployment secret and must never be committed. The orchestrator verifies that the file is readable and that both variables exist after sourcing it, but does not echo their values. Queue-path variables remain non-secret orchestration arguments.
+The launcher transfers repository worker code and ownership helpers at execution time. Worker Python dependency manifests remain canonical under each service's `requirements*.txt` files.
 
-The orchestrator then enforces the operational contract:
+The optional VM setup scripts are deployment conveniences, **not currently evidence by themselves of fully reproducible/supply-chain-pinned bootstrap**. Until the dedicated bootstrap remediation is integrated, operators should treat the canonical requirements files and reviewed repository revision as the dependency contract and review any external Ollama installation/model acquisition separately.
 
-- every SSH/SCP boundary uses the verified host-key trust store;
-- the Publisher credential remains server-side on the Publisher VM instead of being interpolated into SSH command arguments;
-- a failed Harvester exits the batch without deleting pending state;
-- the Harvester source file is deleted only after Publisher inbound transfer succeeds;
-- Publisher inbound never overwrites Publisher retry state;
-- Publisher non-zero exit is propagated instead of printing a false success;
-- VM shutdown after a Publisher failure is allowed because any active retry state or newly produced quarantine is already durable on disk.
+## Deterministic ownership proof
 
-The Hyper-V topology is optional and must not be treated as the only way to develop, test or host the project.
+The CI Publisher/Harvester suites force the critical interleavings with barriers/events rather than hoping a scheduler triggers a race:
+
+1. Publisher consumer claims/reads A, pauses, producer enqueues B, then A finishes — B remains processable.
+2. launcher claims Harvester A, a later Harvester persists B, then A is acknowledged — B remains pending.
+3. two `pwsh` launcher processes from different checkout directories target the same resource identities — the second cannot acquire the host-global lock while the first holds it.
+4. consumer/launcher crash after claim — exact claimed state is recovered.
+5. producer crash before atomic inbox publication — no partial final batch is consumer-visible.
+6. same batch replay — spool/database idempotency converges without a duplicate publication.
+7. B arrives while A transitions into retry state — retry A and queued B both survive and are consumed on the next safe pass.
+
+Control cases execute the old vulnerable orderings (`snapshot A → write B → unlink shared pathname`) and demonstrate deterministic data loss. This is evidence that the regression harness crosses the original ownership boundary rather than merely testing happy-path helpers.
 
 ## Clean-room verification
 
-The repository deliberately composes clean-room proof from focused deterministic gates rather than a single infrastructure-heavy environment.
-
-From a fresh clone, the expected verification chain is:
+From a fresh clone, the expected deterministic verification chain is:
 
 1. install frontend dependencies with `npm ci`;
-2. run dependency audits, lint, typecheck and production build;
-3. install each Python service's requirements and run its tests;
-4. start disposable PostgreSQL, apply all migrations and execute `supabase/tests/rls_contract.sql`;
-5. start the repository-owned fake Supabase HTTP fixture and production Next.js server;
-6. verify `/api/health` responds;
-7. run deterministic Browser E2E/accessibility tests;
-8. run security gates (Python audits, Gitleaks and CodeQL through GitHub Actions).
+2. run npm audits, lint, typecheck and production build;
+3. install each Python service from its checked-in test requirements and run its deterministic tests;
+4. start disposable PostgreSQL, apply migrations and execute `supabase/tests/rls_contract.sql`;
+5. start the repository fake-Supabase fixture plus production Next.js server;
+6. verify `/api/health` as process liveness;
+7. run Browser E2E/accessibility;
+8. run Security and CodeQL workflows.
 
-The GitHub Actions workflows implement these boundaries independently so failures remain attributable and CI never needs production credentials.
-
-For a portable file-handoff smoke test, configure distinct files and explicitly move/copy a completed Harvester pending batch into the Publisher inbound path only after the source batch is durable:
-
-```bash
-export LMN_OUTPUT_FILE=/tmp/lmn/harvester.pending.json
-export LMN_INPUT_FILE=/tmp/lmn/publisher.inbound.json
-export LMN_RETRY_FILE=/tmp/lmn/publisher.retry.json
-export LMN_REJECTED_FILE=/tmp/lmn/publisher.rejected.json
-```
-
-A correct smoke test must include at least one partial Publisher failure followed by a second inbound batch and prove that retained transient work and the new item remain recoverable. It should also prove that a permanent failure moves to quarantine and is not retried on the following no-work run. Merely proving `process_batch()` in isolation is insufficient for the end-to-end durability claim.
+Critical CI uses synthetic/local fixtures and must not contain production secrets.
 
 ## Production smoke verification
 
-Deterministic CI cannot prove DNS, hosted Supabase networking, production secrets, real external feed availability or local Ollama availability. After deploying an environment, perform a bounded smoke check appropriate to that environment:
+A deployment smoke should verify, as applicable:
 
-- frontend origin resolves over HTTPS;
-- `/api/health` returns `200`;
-- public news read path can reach the intended Supabase project;
-- an ordinary authenticated user cannot enter the CMS;
-- an intended administrator can authenticate and reach the CMS;
-- database RLS remains enabled and migrations match the repository;
-- Publisher can perform a controlled idempotent persistence check without exposing credentials;
-- Harvester pending → Publisher inbound ownership transfer preserves any Publisher retry file;
-- a retained transient Publisher failure survives a subsequent inbound batch;
-- a permanent Publisher failure is quarantined and is not retried automatically;
-- Hyper-V deployments reject unknown/changed SSH host keys and load Publisher secrets only from the trusted Publisher-side environment file;
-- Harvester/provider connectivity is checked separately if live ingestion is enabled.
+- frontend origin resolves over HTTPS and `/api/health` returns `200`;
+- public reads reach the intended Supabase project;
+- ordinary authenticated users cannot enter CMS and intended admins can;
+- RLS remains enabled and migrations match the reviewed repository state;
+- Harvester provider/feed connectivity is checked separately when enabled;
+- a controlled Harvester pending → claim → Publisher inbox → processing handoff preserves newer pending/inbox work;
+- an intentionally interrupted claimed batch is recoverable after restart;
+- retained retry state survives a later inbound batch;
+- quarantine remains durable and requires operator review;
+- Hyper-V deployments reject untrusted SSH host keys and load Publisher secrets only from the trusted Publisher-side environment file.
 
-Do not put production secrets or personal data into CI fixtures or screenshots to obtain this evidence.
+## What remains intentionally external/manual
 
-## What is intentionally manual
+Pull-request CI does not provision or mutate production Supabase, VM host identities, SSH credentials, Hyper-V hosts, GPU drivers or local model runtimes. These require environment-specific operator actions.
 
-The repository does not automatically provision or mutate a production Supabase project from pull-request CI. Creating the hosted project, configuring production secrets, creating a real administrator account and applying reviewed production migrations are external deployment actions.
-
-For the optional Hyper-V path, verifying/enrolling VM host-key fingerprints, provisioning non-interactive SSH credentials and creating the Publisher-side `publisher.env` file are explicit manual trust/secret setup steps. They are intentionally not automated from repository CI because CI does not possess production VM identity or credentials.
-
-Likewise, provisioning Hyper-V hosts, GPU drivers or local Ollama models is optional environment-specific work and is not a certification dependency for deterministic repository quality gates.
+The optional local AI runtime is not part of the critical CI guarantee. External installer/model supply-chain properties must be documented honestly and are reviewed separately from deterministic application correctness.
 
 ## Residual operational risks
 
 - external feeds can change or disappear;
-- upstream vulnerability databases may lag undisclosed issues;
-- a liveness endpoint cannot replace provider-specific monitoring;
-- production data can expose migration conflicts absent from an empty disposable database;
-- file-based handoff depends on durable local/shared storage and the documented ownership transfer;
-- quarantined Publisher items require operator review rather than automatic retry;
-- optional local infrastructure depends on correctly provisioned host keys, SSH credentials, VM-local secrets and host/network configuration outside the repository.
+- advisory/vulnerability databases can lag undisclosed issues;
+- production data can expose migration conflicts absent from disposable test data;
+- queue durability assumes the filesystem honors the atomic same-filesystem rename/link primitives used by the claim/spool helpers;
+- the ProgramData launcher lock serializes one Windows host, not multiple physical hosts;
+- quarantined Publisher items require operator review;
+- optional VM/Ollama provisioning has supply-chain/reproducibility limits until its dedicated remediation is completed;
+- hosted Supabase/network/provider health still needs environment-specific monitoring beyond process liveness.
