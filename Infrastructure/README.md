@@ -12,15 +12,18 @@ Run the installer from an elevated PowerShell session on Windows 11 Pro/Enterpri
 .\Infrastructure\Install-LMN.ps1
 ```
 
-## Ubuntu ISO integrity
+## Ubuntu ISO source and integrity
 
-Before a real Hyper-V provisioning run, obtain the SHA-256 digest for the **exact ISO configured in `Setup-LMN-Infrastructure.ps1`** from Ubuntu's official release manifest through a trusted administrative/browser channel. Then set:
+The setup keeps an explicit reviewed Ubuntu 24.04 LTS server-image URL rather than discovering an implicit `latest` image. If Canonical advances the point release or an operator intentionally selects another compatible image, set `LMN_UBUNTU_ISO_URL` to the reviewed **absolute HTTPS** image URL.
+
+For the exact selected image, obtain its SHA-256 digest from Ubuntu's official release manifest through a trusted administrative/browser channel and set both values together when overriding the default:
 
 ```powershell
+$env:LMN_UBUNTU_ISO_URL = "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso"
 $env:LMN_UBUNTU_ISO_SHA256 = "<64-character-sha256>"
 ```
 
-The setup script refuses to reuse or mount an ISO unless its SHA-256 matches that expected digest. Missing/malformed digest input or a digest mismatch terminates provisioning before VM creation uses the image.
+The setup script refuses non-HTTPS source overrides and refuses to reuse or mount an ISO unless its SHA-256 matches the expected digest. Missing/malformed digest input or a digest mismatch terminates Stage 2 before network/VM provisioning uses the image.
 
 A SHA-256 comparison is an integrity check for the downloaded bytes. It does **not** independently authenticate the Ubuntu release origin if both the image and digest source were compromised. Treat the official release origin/manifest and the channel used to verify it as an external trust boundary.
 
