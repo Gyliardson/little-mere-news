@@ -34,9 +34,14 @@ $ISOPath       = Join-Path $InfraRoot "ISO"
 # Network configuration
 $SwitchName = "LMN-Internal-Switch"
 
-# Ubuntu Server 24.04 LTS ISO
-$ISOUrl      = "https://releases.ubuntu.com/24.04/ubuntu-24.04.2-live-server-amd64.iso"
-$ISOFileName = "ubuntu-24.04-server.iso"
+# Ubuntu Server 24.04 LTS ISO. Keep the default explicit and review it when
+# Canonical advances the 24.04 point release; callers may override without source edits.
+$ISOUrl = if ($env:LMN_UBUNTU_ISO_URL) {
+    $env:LMN_UBUNTU_ISO_URL.Trim()
+} else {
+    "https://releases.ubuntu.com/24.04/ubuntu-24.04.4-live-server-amd64.iso"
+}
+$ISOFileName = "ubuntu-24.04-live-server-amd64.iso"
 $ISOFullPath = Join-Path $ISOPath $ISOFileName
 $ExpectedISOSha256 = if ($env:LMN_UBUNTU_ISO_SHA256) {
     $env:LMN_UBUNTU_ISO_SHA256.Trim().ToLowerInvariant()
@@ -114,6 +119,12 @@ function Assert-LmnIsoDigestConfiguration {
         Write-Fail "LMN_UBUNTU_ISO_SHA256 must contain the trusted 64-character SHA-256 digest for the configured Ubuntu ISO."
         Write-Host "  Obtain the digest from Ubuntu's official release manifest through a trusted channel, set the environment variable, and retry." -ForegroundColor Yellow
         Write-Host "  A SHA-256 digest verifies image integrity; it is not an independent signature of the release origin." -ForegroundColor DarkGray
+        exit 1
+    }
+
+    $parsedIsoUri = $null
+    if (-not [Uri]::TryCreate($ISOUrl, [UriKind]::Absolute, [ref]$parsedIsoUri) -or $parsedIsoUri.Scheme -ne "https") {
+        Write-Fail "LMN_UBUNTU_ISO_URL must be an absolute HTTPS URL."
         exit 1
     }
 }
@@ -261,7 +272,6 @@ function Invoke-ISODownload {
     Write-Step "Initiating Ubuntu Server 24.04 LTS ISO download..."
     Write-Host "  URL: $ISOUrl" -ForegroundColor DarkGray
     Write-Host "  Target: $ISOFullPath" -ForegroundColor DarkGray
-    Write-Host "  Estimated Size: ~2.6 GB" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Download may take several minutes depending on network bandwidth." -ForegroundColor DarkGray
     Write-Host ""
@@ -504,6 +514,9 @@ if (-not $canProceed) {
     exit 0
 }
 
+# Validate trusted ISO configuration before mutating Stage 2 network/VM state.
+Assert-LmnIsoDigestConfiguration
+
 # Stage 2: Network, ISO, and VM Provisioning
 Invoke-NetworkSetup
 Invoke-ISODownload
@@ -512,5 +525,5 @@ Invoke-VMProvisioning
 # Report
 Show-FinalReport
 
-Write-Host "  Infrastructure provisioning completed successfully." -ForegroundColor Green
+Write-Host "  Infrastructure provisioning completed successfully."
 Write-Host ""
