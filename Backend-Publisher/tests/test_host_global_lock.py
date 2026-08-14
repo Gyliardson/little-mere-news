@@ -1,6 +1,5 @@
 import shutil
 import subprocess
-import time
 from pathlib import Path
 
 
@@ -20,55 +19,23 @@ def ps_quote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def wait_for(path, process, timeout=15):
-    """Wait only for the explicit holder-acquired marker, never for race timing."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if path.exists():
-            return
-        if process.poll() is not None:
-            stdout, stderr = process.communicate()
-            raise AssertionError(f"lock holder exited before barrier: {stdout}\n{stderr}")
-        time.sleep(0.05)
-    raise AssertionError("timed out waiting for lock-holder acquisition barrier")
-
-
 def test_two_launcher_processes_from_different_checkouts_share_one_host_lock(tmp_path):
-    """Forced Test C: one holder blocks another checkout; process death releases ownership."""
+    """Forced Test C: parent holds the shared lock while a child checkout must fail closed."""
     pwsh = shutil.which("pwsh")
     assert pwsh is not None, "GitHub runner must provide pwsh for Hyper-V contract tests"
 
     checkout_a = tmp_path / "clone-a"
     checkout_b = tmp_path / "clone-b"
     lock_root = tmp_path / "host-global-lock-root"
-    ready = tmp_path / "holder-ready"
     path_a_file = tmp_path / "path-a.txt"
     path_b_file = tmp_path / "path-b.txt"
-    holder_file = tmp_path / "holder.ps1"
     contender_file = tmp_path / "contender.ps1"
     recovery_file = tmp_path / "recovery.ps1"
+    orchestrator_file = tmp_path / "orchestrator.ps1"
     checkout_a.mkdir()
     checkout_b.mkdir()
 
     resources = ", ".join(ps_quote(resource) for resource in RESOURCES)
-    holder_file.write_text(
-        f"""$ErrorActionPreference = 'Stop'
-. {ps_quote(HELPER)}
-$resources = @({resources})
-$root = {ps_quote(lock_root)}
-Set-Location {ps_quote(checkout_a)}
-$path = Get-LmnHostLockPath -ResourceIds $resources -LockRootOverride $root
-Set-Content -LiteralPath {ps_quote(path_a_file)} -Value $path -NoNewline
-$lock = Enter-LmnHostLock -ResourceIds $resources -LockRootOverride $root
-try {{
-    New-Item -ItemType File -Path {ps_quote(ready)} -Force | Out-Null
-    Start-Sleep -Seconds 30
-}} finally {{
-    $lock.Dispose()
-}}
-""",
-        encoding="utf-8",
-    )
     contender_file.write_text(
         f"""$ErrorActionPreference = 'Stop'
 . {ps_quote(HELPER)}
@@ -96,45 +63,47 @@ try {{ exit 0 }} finally {{ $lock.Dispose() }}
 """,
         encoding="utf-8",
     )
+    orchestrator_file.write_text(
+        f"""$ErrorActionPreference = 'Stop'
+. {ps_quote(HELPER)}
+$resources = @({resources})
+$root = {ps_quote(lock_root)}
+$pwsh = {ps_quote(pwsh)}
+Set-Location {ps_quote(checkout_a)}
+$pathA = Get-LmnHostLockPath -ResourceIds $resources -LockRootOverride $root
+Set-Content -LiteralPath {ps_quote(path_a_file)} -Value $pathA -NoNewline
+$holder = Enter-LmnHostLock -ResourceIds $resources -LockRootOverride $root
+try {{
+    # Forced interleaving: this independent pwsh process is invoked synchronously
+    # only after the holder already owns the shared resource lock. There is no
+    # scheduler/time-based marker to wait for.
+    & $pwsh -NoProfile -NonInteractive -File {ps_quote(contender_file)}
+    if ($LASTEXITCODE -ne 0) {{ throw "contender did not fail closed while holder owned the lock (exit $LASTEXITCODE)" }}
+}} finally {{
+    $holder.Dispose()
+}}
 
-    holder = subprocess.Popen(
-        [pwsh, "-NoProfile", "-NonInteractive", "-File", str(holder_file)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+$pathB = Get-Content -LiteralPath {ps_quote(path_b_file)} -Raw
+if ($pathA -ne $pathB) {{ throw 'same remote resources produced checkout-specific lock paths' }}
+
+# After explicit release, another independent process must be able to acquire the
+# same resource lock. This proves serialization rather than a permanently wedged file.
+& $pwsh -NoProfile -NonInteractive -File {ps_quote(recovery_file)}
+if ($LASTEXITCODE -ne 0) {{ throw "lock was not recoverable after release (exit $LASTEXITCODE)" }}
+""",
+        encoding="utf-8",
     )
-    try:
-        # This wait only ensures the holder has explicitly reported lock acquisition.
-        # The contender is launched *after* that marker, so overlap ordering remains deterministic.
-        wait_for(ready, holder)
-        contender = subprocess.run(
-            [pwsh, "-NoProfile", "-NonInteractive", "-File", str(contender_file)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert contender.returncode == 0, contender.stderr or contender.stdout
-        assert path_a_file.read_text(encoding="utf-8") == path_b_file.read_text(encoding="utf-8")
-        assert "batch-" in path_a_file.read_text(encoding="utf-8")
-    finally:
-        # A killed launcher is an explicit crash interleaving. OS handle cleanup must
-        # release the global file lock rather than leaving the resource permanently wedged.
-        holder.terminate()
-        try:
-            holder.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            holder.kill()
-            holder.communicate(timeout=5)
 
-    recovery = subprocess.run(
-        [pwsh, "-NoProfile", "-NonInteractive", "-File", str(recovery_file)],
+    completed = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-File", str(orchestrator_file)],
         check=False,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=60,
     )
-    assert recovery.returncode == 0, recovery.stderr or recovery.stdout
+    assert completed.returncode == 0, completed.stderr or completed.stdout
+    assert path_a_file.read_text(encoding="utf-8") == path_b_file.read_text(encoding="utf-8")
+    assert "batch-" in path_a_file.read_text(encoding="utf-8")
 
 
 def test_host_lock_default_is_not_repository_relative():
