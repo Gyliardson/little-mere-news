@@ -1,0 +1,79 @@
+name: Browser E2E
+
+on:
+  push:
+    branches:
+      - 'work/**'
+      - portfolio/revamp-2026
+  pull_request:
+    branches:
+      - portfolio/revamp-2026
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend-web
+    env:
+      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: ci-placeholder-anon-key
+      SUPABASE_SERVICE_ROLE_KEY: ci-placeholder-service-role-key
+      ADMIN_PHANTOM_PATH: ci-admin
+      E2E_BASE_URL: http://127.0.0.1:3000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend-web/package-lock.json
+      - run: npm ci
+      - name: Media payload budget
+        shell: bash
+        run: |
+          logo_bytes=$(wc -c < public/logo.png)
+          echo "logo-bytes=${logo_bytes}"
+          test "${logo_bytes}" -lt 529528
+          test ! -e ../docs/assets/readme/walkthrough.gif
+      - run: npx playwright install --with-deps chromium
+      - name: Build and browser regressions
+        shell: bash
+        run: |
+          set -o pipefail
+          node e2e/fake-supabase.mjs > /tmp/fake-supabase.log 2>&1 &
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:54321/rest/v1/news >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          npm run build
+          npm run start -- -H 127.0.0.1 -p 3000 > /tmp/lmn-next.log 2>&1 &
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:3000/en/ci-admin/login >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          npm run test:e2e 2>&1 | tee /tmp/browser-tests.log
+      - name: Capture browser failure evidence
+        if: failure()
+        run: |
+          mkdir -p test-results
+          cp /tmp/lmn-next.log test-results/next.log 2>/dev/null || true
+          cp /tmp/fake-supabase.log test-results/fake-supabase.log 2>/dev/null || true
+          cp /tmp/browser-tests.log test-results/browser-tests.log 2>/dev/null || true
+          npx playwright screenshot http://127.0.0.1:3000/en/ci-admin/login test-results/failure.png || true
+      - name: Upload browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-e2e-failure-${{ github.sha }}
+          path: frontend-web/test-results
+          if-no-files-found: warn
+          retention-days: 7

@@ -1,191 +1,145 @@
 # Little Mere News
 
-[![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/Gyliardson/little-mere-news/blob/main/README.md)
-[![pt-br](https://img.shields.io/badge/lang-pt--br-green.svg)](https://github.com/Gyliardson/little-mere-news/blob/main/README.pt-br.md)
+[![en](https://img.shields.io/badge/lang-en-red.svg)](README.md)
+[![pt-br](https://img.shields.io/badge/lang-pt--br-green.svg)](README.pt-br.md)
 
-An automated, bilingual technology news platform utilizing Local Artificial Intelligence (LLMs) and on-demand batch processing to minimize cloud operational costs.
+Little Mere News is a bilingual technology-news platform that combines a Next.js portal and CMS, a Python ingestion/processing pipeline, Supabase/PostgreSQL, and optional local AI inference through Ollama. The project is designed as a hybrid local/cloud system while keeping its critical test path independent from domestic GPU, Hyper-V, Ollama, live feeds, and a production Supabase project.
 
-![Python](https://img.shields.io/badge/python-3670A0?style=for-the-badge&logo=python&logoColor=ffdd54)
-![PowerShell](https://img.shields.io/badge/PowerShell-%235391FE.svg?style=for-the-badge&logo=powershell&logoColor=white)
-![Ubuntu](https://img.shields.io/badge/Ubuntu-E95420?style=for-the-badge&logo=ubuntu&logoColor=white)
-![Supabase](https://img.shields.io/badge/Supabase-3ECF8E?style=for-the-badge&logo=supabase&logoColor=white)
-![Next JS](https://img.shields.io/badge/Next-black?style=for-the-badge&logo=next.js&logoColor=white)
-![Ollama](https://img.shields.io/badge/Ollama-black?style=for-the-badge&logo=ollama&logoColor=white)
-
-## System Architecture
-
-Little Mere News employs a **Batch Processing** pattern combined with a hybrid (Local + Cloud) infrastructure. Instead of paying for expensive cloud GPUs that run 24/7, all compute-intensive tasks (web scraping and AI inference) are executed locally on an isolated Hyper-V cluster.
-
-### Local Infrastructure & AI Pipeline
-
-This cluster is automatically provisioned and booted on-demand via a PowerShell orchestrator. It processes the daily news, uploads the formatted data to the cloud, and subsequently shuts down to conserve local hardware resources.
+## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Local["Local Environment (Hyper-V)"]
-        H[Harvester: Python Scraper]
-        B[Brain: Ollama / Llama 3]
-        P[Publisher: Supabase Client]
-        
-        H -->|Data Collection| B
-        B -->|Translation & Summarization| P
-    end
-    
-    subgraph Cloud["Cloud Infrastructure"]
-        DB[(Supabase PostgreSQL)]
-        R[Frontend: Next.js SSR]
-        
-        DB -->|Real-time Fetch / RLS| R
-    end
-
-    P -->|JSON Payload Upload| DB
+  S[External sources] --> H[Python Harvester]
+  H --> A[AI provider boundary]
+  A --> Q[Validated JSON queue]
+  Q --> P[Python Publisher]
+  P --> DB[(Supabase/PostgreSQL)]
+  DB --> W[Next.js SSR portal]
+  DB --> C[Admin CMS]
 ```
 
-### Frontend & Administrative Panel
+The repository contains:
 
-The frontend is built with Next.js using the App Router, featuring Server-Side Rendering (SSR) for optimal SEO and performance. The system includes a fully functional Content Management System (CMS) tailored for the administration of the news corpus.
+- `frontend-web/` — Next.js App Router portal and administrative CMS;
+- `Backend-Harvester/` — source ingestion and local AI processing;
+- `Backend-Publisher/` — validated, retry-safe publishing to Supabase;
+- `supabase/migrations/` — versioned database schema, constraints and RLS policies;
+- `supabase/tests/` — deterministic PostgreSQL security/contract tests;
+- `Infrastructure/` — optional Hyper-V/local orchestration scripts;
+- `.github/workflows/ci.yml` — frontend, Python, PostgreSQL and blocking frontend dependency quality gates;
+- `.github/workflows/browser-e2e.yml` — deterministic Chromium E2E and accessibility regressions;
+- `.github/workflows/security.yml` — Python dependency and committed-secret verification;
+- `.github/workflows/codeql.yml` — static analysis for JavaScript/TypeScript and Python.
 
-#### Defense-in-Depth Security
+## Content pipeline
 
-The administration panel relies on a layered security model:
+The intended data flow is:
 
-1. **The "Phantom Route" (Obfuscation):** The administrative dashboard is not accessible via a standard `/admin` URL. Instead, it utilizes a dynamic route parameter `[secret_admin]`, populated by an environment variable (`ADMIN_PHANTOM_PATH`). This acts as an initial mitigation against automated vulnerability scanners and brute-force bots, drastically reducing server noise.
-2. **SSR Authentication (Cryptographic Verification):** The core security is guaranteed by Supabase Auth integrated directly into the Next.js middleware and server components. Even if the "Phantom Route" is discovered, unauthorized access is completely blocked at the server level; no sensitive data is transmitted to an unauthenticated client.
-3. **Row Level Security (RLS):** Data integrity is enforced at the database layer (see the Supabase Technical Manual below).
+`source → scrape/parse → normalize → AI/process → validate → persist queue → publish → frontend`
 
-#### CMS Functionality
+External source content is treated as untrusted and mutable. Critical tests use deterministic fixtures instead of requiring live feeds. AI output is validated before it can enter the publish path, and publisher retries preserve failed items instead of deleting the only copy after a partial failure.
 
-The dashboard provides real-time metrics and full CRUD capabilities through modern, accessible modal interfaces. Features include:
-* **Interactive Dashboard:** Real-time visualization of processed volume and active sources.
-* **Inline Editing:** Quick approval and modification of AI-generated articles using synchronized state management.
-* **Internationalization (i18n):** Both the public portal and the admin dashboard are fully localized in English and Portuguese.
+## Security model
 
-#### Route Structure Table
+Security does **not** depend on a secret URL.
 
-| Route Pattern | Access Level | Description |
-| :--- | :--- | :--- |
-| `/[lang]` | Public | Main localized portal (Home). |
-| `/[lang]/news/[slug]` | Public | Detailed view of a specific article. |
-| `/[lang]/[secret_admin]/login` | Unauthenticated | Entry point to acquire a Supabase session. |
-| `/[lang]/[secret_admin]/(dashboard)` | **Authenticated Admin** | Protected CMS overview and metric charts. |
-| `/[lang]/[secret_admin]/(dashboard)/news` | **Authenticated Admin** | Protected route for editing and managing articles. |
+The project uses three separate controls:
 
-## User Interface & Features
+1. **Supabase Auth** establishes the authenticated user session.
+2. **Server-side authorization** requires explicit membership in `public.admin_users` before dashboard access or privileged server actions are allowed.
+3. **PostgreSQL Row Level Security (RLS)** independently restricts browser-facing writes to authenticated users whose `auth.uid()` is present in `public.admin_users`.
 
-<p align="center">
-  <img src="docs/assets/readme/walkthrough.gif" width="800" alt="Platform Walkthrough">
-  <br>
-  <em>Figure 1: Comprehensive walkthrough demonstrating the authentication process, dashboard overview, and news management flow.</em>
-</p>
+`ADMIN_PHANTOM_PATH` only changes the administrative URL. It may reduce trivial bot/scanner noise, but it is **not authentication, authorization, or a security boundary**. The application must remain secure if that path becomes public.
 
-### Public Portal vs. Administrative Dashboard
+The local publisher uses a server-side Supabase credential. Service-role credentials must never be exposed to browser code, public environment variables, screenshots, CI logs, or committed files.
 
-| Public Portal (Home) | Administrative Dashboard |
-| :---: | :---: |
-| <img src="docs/assets/readme/home.png" width="400" alt="Public Portal Home"> | <img src="docs/assets/readme/dashboard.png" width="400" alt="Administrative Dashboard"> |
-| <em>Figure 2: The bilingual public-facing portal displaying aggregated technology news.</em> | <em>Figure 3: Administrative Dashboard illustrating real-time server-side news aggregation metrics.</em> |
+### Database contract
 
-### Content Management & Authentication
+Database state is versioned in GitHub under `supabase/migrations/`.
 
-| Secure Login Interface | CMS Article Management |
-| :---: | :---: |
-| <img src="docs/assets/readme/login.png" width="400" alt="Secure Login Interface"> | <img src="docs/assets/readme/cms_list.png" width="400" alt="CMS Article List"> |
-| <em>Figure 4: The Phantom Route authenticated login interface utilizing Supabase SSR.</em> | <em>Figure 5: The CMS list view providing real-time status and quick actions for articles.</em> |
+Current security and integrity guarantees include:
 
-| CMS Actions Menu | Detailed Article View |
-| :---: | :---: |
-| <img src="docs/assets/readme/cms_actions_menu.png" width="400" alt="CMS Actions Menu"> | <img src="docs/assets/readme/public_article.png" width="400" alt="Public Article Detail"> |
-| <em>Figure 6: Contextual actions menu facilitating efficient content modification and state transitions.</em> | <em>Figure 7: Server-Side Rendered detailed article view ensuring optimal SEO performance.</em> |
+- public `SELECT` access to `news` for `anon` and `authenticated` roles;
+- `INSERT`, `UPDATE`, and `DELETE` on `news` allowed through RLS only for users listed in `admin_users`;
+- ordinary authenticated users cannot create their own admin membership;
+- `news.source_url` is unique, providing the durable idempotency contract used by the publisher.
 
-## Repository Structure
+The deterministic SQL contract in `supabase/tests/rls_contract.sql` exercises anonymous, ordinary authenticated, and administrator behavior against a disposable PostgreSQL instance.
 
-The project is modularized to reflect its microservices architecture:
+## CI and tests
 
+GitHub Actions runs independent gates for:
+
+- frontend dependency audits, lint, TypeScript typecheck, and production build;
+- deterministic Harvester tests;
+- deterministic Publisher tests;
+- PostgreSQL migration/RLS contract tests;
+- Chromium browser E2E for locale handling, public failure states, unauthenticated routing, ordinary-user authorization denial, and administrator access;
+- browser accessibility regressions for labels, keyboard navigation, dialog semantics, focus restoration, and representative structural checks;
+- Python dependency auditing;
+- full-history committed-secret scanning with a pinned/checksummed Gitleaks binary;
+- commit-pinned CodeQL analysis for JavaScript/TypeScript and Python.
+
+Browser tests run the production Next.js server against a repository-owned loopback Supabase HTTP fixture. The fixture uses synthetic users and news records only; no production credentials, production Supabase project, live feeds, Ollama, GPU, or Hyper-V environment are required. Failure runs preserve application/fixture logs and a diagnostic screenshot as short-lived GitHub Actions artifacts.
+
+The checked-in frontend package manifests are the audited dependency state. Both production-only and full-tree npm audits are blocking CI checks at high severity or above; a generated candidate is never treated as a passing security claim until its manifests are committed.
+
+See [`docs/testing.md`](docs/testing.md) for deterministic test execution and [`docs/deployment.md`](docs/deployment.md) for the deploy/runtime and clean-room contract.
+
+## Local setup
+
+### Frontend
+
+```bash
+cd frontend-web
+npm ci
+cp .env.example .env.local
+npm run dev
 ```
-Little Mere News/
-├── Infrastructure/          # Provisioning scripts & one-click installer
-│   ├── Install-LMN.bat      # ← START HERE (One-click installer)
-│   ├── Install-LMN.ps1      # Unified installer orchestrator
-│   ├── Setup-LMN-Infra...   # Hyper-V, network & VM provisioning
-│   ├── Run-LMN.bat           # Batch launcher (Desktop shortcut target)
-│   ├── Run-LMN-Batch.ps1     # Pipeline orchestrator (VMs → Scrape → AI → Upload)
-│   └── setup_*.sh            # Linux provisioning scripts (executed inside VMs)
-├── Backend-Harvester/       # Python: RSS/API scraping & data collection
-├── Backend-Publisher/       # Python: Supabase upsert client
-└── Frontend-Web/            # Next.js SSR portal & admin CMS
-```
 
-## Setup & Configuration
+Configure the Supabase public URL/key and `ADMIN_PHANTOM_PATH` in `.env.local`. Do not place a service-role key in browser-exposed variables. The frontend-specific environment, production build/start, healthcheck and E2E commands are documented in [`frontend-web/README.md`](frontend-web/README.md).
 
-### Quick Start (One-Click Installer)
+### Python services
 
-The project includes a unified installer that automates the entire local infrastructure setup:
+Each Python service owns its dependencies. For deterministic development/testing, use the repository test requirements and fixtures rather than live external infrastructure where possible.
 
-1. Clone the repository.
-2. Configure your environment variables (see steps below).
-3. Navigate to the `Infrastructure/` folder.
-4. **Double-click `Install-LMN.bat`.**
+### Database
 
-The installer will automatically:
-- Request Administrator privileges (UAC prompt).
-- Enable Hyper-V (if not already active — requires reboot).
-- Create the internal virtual network (`LMN-Internal-Switch`).
-- Download the Ubuntu Server 24.04 LTS ISO (~2.6 GB).
-- Provision 3 Generation 2 VMs (Harvester, Brain, Publisher).
-- Create a Desktop shortcut with the project icon for daily batch execution.
+Apply the SQL files in `supabase/migrations/` in filename order. The repository CI validates the same migration chain against PostgreSQL before exercising the RLS contract.
 
-> **Dry Run Mode:** To test the installer without making system changes, run the following in an elevated PowerShell session:
-> ```powershell
-> powershell -NoProfile -ExecutionPolicy Bypass -File ".\Infrastructure\Install-LMN.ps1" -DryRun
-> ```
+To grant administrative access in an environment, insert the intended authenticated user's UUID into `public.admin_users` using a trusted administrative/database channel. Do not expose a client-side self-enrollment path.
 
-After installation, use the **"Little Mere News - Batch"** shortcut on your Desktop to run the daily news processing pipeline.
+### Optional local infrastructure
 
-### 1. Root Infrastructure (.env)
-Used by PowerShell and Python scripts to communicate with Supabase.
-1. Copy `.env.example` to `.env`.
-2. Fill in your `SUPABASE_URL` and `SUPABASE_KEY` (service_role).
+`Infrastructure/` contains the original Windows/Hyper-V orchestration for the local Harvester/Brain/Publisher topology. It remains a supported deployment option, not a prerequisite for building or testing the repository.
 
-### 2. Frontend Web (.env.local)
-Used by the Next.js application.
-1. Navigate to `/frontend-web`.
-2. Copy `.env.example` to `.env.local`.
-3. Fill in the public and private keys, including the `ADMIN_PHANTOM_PATH`.
+## Deployment and clean-room verification
 
-### 3. Supabase Technical Manual (Keys & RLS)
+Deployment is intentionally componentized: the Next.js frontend, Supabase/PostgreSQL, Harvester, Publisher, optional Ollama inference and optional Hyper-V orchestration have distinct runtime boundaries. A clean-room validation must start from a fresh checkout, apply the documented environment and database contract, build/start the production frontend, verify `/api/health` as **Next.js process liveness only**, and then run the deterministic test suites. Provider readiness and external-source availability require separate smoke checks.
 
-To ensure the security model functions correctly for new deployments, the Supabase PostgreSQL database must be configured with Row Level Security (RLS). 
+See [`docs/deployment.md`](docs/deployment.md) for the authoritative runbook and residual operational limitations.
 
-**Best Practices Setup:**
-1. **Enable RLS:** Navigate to the Authentication -> Policies tab in your Supabase dashboard and enable RLS on the `news` table.
-2. **Public Read Access:** Create a policy allowing `SELECT` operations for the `anon` (anonymous) role. This permits the Next.js public routes to fetch articles.
-    ```sql
-    -- Example Policy: "Allow public read access"
-    CREATE POLICY "Allow public read access" ON "public"."news"
-    FOR SELECT USING (true);
-    ```
-3. **Admin Write Access:** Create policies for `INSERT`, `UPDATE`, and `DELETE` that are restricted strictly to the `authenticated` role (and optionally, specific admin user UUIDs).
-    ```sql
-    -- Example Policy: "Allow admins to update"
-    CREATE POLICY "Allow admins to update" ON "public"."news"
-    FOR UPDATE USING (auth.role() = 'authenticated');
-    ```
-4. **Service Role (Local Batch):** The `LMN-Publisher` running locally utilizes the `service_role` key, which inherently bypasses RLS to perform bulk upserts safely from the isolated Hyper-V environment. **Never expose the `service_role` key in the frontend.**
+## UI evidence
+
+The lightweight static evidence below replaces the former 20+ MB animated walkthrough while preserving representative public and administrative views.
+
+| Public portal | Administrative dashboard |
+| :---: | :---: |
+| <img src="docs/assets/readme/home.png" width="400" alt="Public portal home"> | <img src="docs/assets/readme/dashboard.png" width="400" alt="Administrative dashboard"> |
+
+| Login | CMS article management |
+| :---: | :---: |
+| <img src="docs/assets/readme/login.png" width="400" alt="Administrative login"> | <img src="docs/assets/readme/cms_list.png" width="400" alt="CMS article list"> |
+
+## Operational limitations
+
+- External publishers and feeds can change markup, metadata, availability, or rate behavior without notice.
+- Local Ollama inference is optional for the production pipeline but deliberately excluded from deterministic CI.
+- The browser Supabase fixture is a deterministic contract double, not a replacement for a production-environment smoke test.
+- Dependency scanners depend on upstream advisory data and cannot prove the absence of undisclosed or not-yet-published vulnerabilities.
+- Production Supabase migrations must be reviewed against existing data before deployment; the uniqueness migration intentionally does not silently delete duplicate records.
+- Hyper-V orchestration is environment-specific and should not be treated as the only supported development path.
 
 ## License
 
-This project is licensed under a Custom MIT License. You are free to use, modify, and distribute this software for personal and educational purposes. **Commercial use is permitted but strictly requires visible attribution to the author in both the code and the final product.** 
-
-*Disclaimer: The author is not responsible for data loss or damages caused by the use of this code. Jurisdiction for any disputes is exclusively in Brazil.* See the [LICENSE](LICENSE) file for full details.
-
-## Contributing & Git Standards
-
-To maintain a clean and comprehensible commit history, this repository follows a structured commit message pattern. All subsequent commits must adhere to the following format:
-
-* `[Version] | Feature | Description` (For new features)
-* `[Version] | Fix | Description` (For bug fixes)
-* `[Version] | Docs | Description` (For documentation updates)
-* `[Version] | Refactor | Description` (For code refactoring without visual impact)
-
-**Example:**
-`v1.0.1 | Fix | Resolves issue with pagination in the admin dashboard`
+See [LICENSE](LICENSE) for the repository's licensing terms.

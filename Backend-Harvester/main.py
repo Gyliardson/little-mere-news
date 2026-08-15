@@ -1,43 +1,271 @@
+import calendar
+import fcntl
+import http.client
+import ipaddress
 import json
-import time
-import requests
-import feedparser
+import os
 import socket
+import ssl
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import urljoin, urlparse
+
+import feedparser
+import requests
 from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
 
 # ==========================================
 # Little Mere News - Harvester Script
 # ==========================================
 
-# Global timeout to prevent infinite hangs from Cloudflare/slow websites
-socket.setdefaulttimeout(15)
-
-# ==========================================
-# Little Mere News - Harvester Script
-# ==========================================
-
-# Configurations
-OLLAMA_API_URL = "http://10.0.100.20:11434/api/generate"
-FEEDS_FILE = "/home/lmnadmin/feeds.json"
-OUTPUT_FILE = "/home/lmnadmin/news_to_publish.json"
+OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://10.0.100.20:11434/api/generate")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3:latest")
+FEEDS_FILE = os.getenv("LMN_FEEDS_FILE", "/home/lmnadmin/feeds.json")
+OUTPUT_FILE = os.getenv("LMN_OUTPUT_FILE", "/home/lmnadmin/news_to_publish.json")
 HOURS_LIMIT = 24
-MAX_PER_FEED = 2 # Prevent overloading the local AI
+MAX_PER_FEED = 2
+SOURCE_TIMEOUT_SECONDS = 15
+AI_TIMEOUT_SECONDS = 60
+MAX_RETRIES = 2
+MAX_REDIRECTS = 5
+MAX_FEED_BYTES = 5 * 1024 * 1024
+REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+AI_REQUIRED_FIELDS = ("title_en", "title_pt", "summary_en", "summary_pt")
+
+
+class FeedTransportError(Exception):
+    """Raised when the bounded external-feed transport cannot complete safely."""
+
+
+class FeedHTTPResponse:
+    """Minimal response contract consumed by fetch_feed()."""
+
+    def __init__(self, status_code, headers, content):
+        self.status_code = status_code
+        self.headers = headers
+        self.content = content
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise FeedTransportError(f"Feed returned HTTP {self.status_code}")
+
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that dials a validated IP while verifying the original hostname."""
+
+    def __init__(self, address, hostname, port, timeout):
+        super().__init__(
+            hostname,
+            port=port,
+            timeout=timeout,
+            context=ssl.create_default_context(),
+        )
+        self._pinned_address = str(address)
+
+    def connect(self):
+        original_host = self.host
+        self.host = self._pinned_address
+        try:
+            http.client.HTTPConnection.connect(self)
+        finally:
+            self.host = original_host
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=original_host)
+
 
 def clean_html(raw_html):
-    """Remove HTML tags and return clean text."""
+    """Remove HTML tags and return normalized visible text."""
+    if not isinstance(raw_html, str):
+        return ""
     soup = BeautifulSoup(raw_html, "html.parser")
     return soup.get_text(separator=" ", strip=True)
 
-def parse_date(entry):
-    """Extract publication date from RSS entry."""
-    if hasattr(entry, 'published_parsed') and entry.published_parsed:
-        return datetime.fromtimestamp(time.mktime(entry.published_parsed))
-    return datetime.now()
 
-def call_ollama(text):
-    """Call the local Llama 3 model for translation and summarization."""
-    prompt = f"""
+def parse_date(entry):
+    """Return an aware UTC publication datetime, or None when unavailable/invalid."""
+    published = getattr(entry, "published_parsed", None)
+    if not published:
+        return None
+    try:
+        timestamp = calendar.timegm(published)
+        return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+    except (OverflowError, TypeError, ValueError):
+        return None
+
+
+def valid_source_url(value):
+    """Accept only absolute HTTP(S) URLs as durable article identity."""
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value.strip())
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _resolved_addresses(hostname, port, resolver=socket.getaddrinfo):
+    """Resolve a hostname to concrete IP addresses for outbound policy checks."""
+    try:
+        literal = ipaddress.ip_address(hostname)
+        return {literal}
+    except ValueError:
+        pass
+
+    try:
+        results = resolver(hostname, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(f"Could not resolve feed host {hostname!r}: {exc}") from exc
+
+    addresses = set()
+    for result in results:
+        sockaddr = result[4]
+        if not sockaddr:
+            continue
+        try:
+            addresses.add(ipaddress.ip_address(sockaddr[0]))
+        except ValueError as exc:
+            raise ValueError(f"Resolver returned invalid address for {hostname!r}") from exc
+    if not addresses:
+        raise ValueError(f"Feed host {hostname!r} resolved to no usable addresses")
+    return addresses
+
+
+def resolve_feed_target(value, resolver=socket.getaddrinfo):
+    """Validate a feed URL and return the exact public addresses approved for connection."""
+    if not isinstance(value, str):
+        raise ValueError(f"Invalid feed URL: {value!r}")
+    normalized = value.strip()
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError(f"Invalid feed URL: {value!r}")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Feed URLs must not contain credentials")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise ValueError(f"Invalid feed URL port: {value!r}") from exc
+
+    addresses = _resolved_addresses(parsed.hostname, port, resolver=resolver)
+    forbidden = sorted(str(address) for address in addresses if not address.is_global)
+    if forbidden:
+        raise ValueError(
+            f"Feed target {parsed.hostname!r} resolves to forbidden non-public address(es): "
+            + ", ".join(forbidden)
+        )
+    approved = tuple(sorted(addresses, key=lambda address: (address.version, int(address))))
+    return normalized, approved
+
+
+def validate_feed_target(value, resolver=socket.getaddrinfo):
+    """Require an external HTTP(S) feed target resolving only to public IP space."""
+    normalized, _ = resolve_feed_target(value, resolver=resolver)
+    return normalized
+
+
+def _host_header(parsed):
+    hostname = parsed.hostname or ""
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"Invalid feed URL port: {parsed.geturl()!r}") from exc
+    default_port = 443 if parsed.scheme == "https" else 80
+    return f"{host}:{port}" if port is not None and port != default_port else host
+
+
+def _request_target(parsed):
+    target = parsed.path or "/"
+    if parsed.params:
+        target += f";{parsed.params}"
+    if parsed.query:
+        target += f"?{parsed.query}"
+    return target
+
+
+def pinned_feed_request(url, address, timeout=SOURCE_TIMEOUT_SECONDS):
+    """Connect to one already-approved IP without performing a second DNS lookup."""
+    parsed = urlparse(url)
+    if not parsed.hostname or parsed.scheme not in {"http", "https"}:
+        raise ValueError(f"Invalid feed URL: {url!r}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    connection = None
+    try:
+        if parsed.scheme == "https":
+            connection = PinnedHTTPSConnection(
+                address=address,
+                hostname=parsed.hostname,
+                port=port,
+                timeout=timeout,
+            )
+        else:
+            connection = http.client.HTTPConnection(str(address), port=port, timeout=timeout)
+
+        connection.request(
+            "GET",
+            _request_target(parsed),
+            headers={
+                "Host": _host_header(parsed),
+                "User-Agent": "Little-Mere-News-Harvester/1.0",
+                "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*;q=0.1",
+                "Connection": "close",
+            },
+        )
+        response = connection.getresponse()
+        content = response.read(MAX_FEED_BYTES + 1)
+        if len(content) > MAX_FEED_BYTES:
+            raise FeedTransportError(
+                f"Feed response exceeds {MAX_FEED_BYTES} byte safety limit"
+            )
+        return FeedHTTPResponse(
+            status_code=response.status,
+            headers={key: value for key, value in response.getheaders()},
+            content=content,
+        )
+    except (OSError, ssl.SSLError, http.client.HTTPException) as exc:
+        raise FeedTransportError(str(exc)) from exc
+    finally:
+        if connection is not None:
+            connection.close()
+
+
+def validate_ai_result(value):
+    """Validate the structured article contract expected from the AI provider."""
+    if not isinstance(value, dict):
+        return None
+    normalized = {}
+    for field in AI_REQUIRED_FIELDS:
+        field_value = value.get(field)
+        if not isinstance(field_value, str):
+            return None
+        field_value = field_value.strip()
+        if not field_value:
+            return None
+        normalized[field] = field_value
+    return normalized
+
+
+def decode_ollama_response(payload):
+    """Decode and validate an Ollama API response without performing I/O."""
+    if not isinstance(payload, dict):
+        return None
+    response_text = payload.get("response")
+    if not isinstance(response_text, str):
+        return None
+    try:
+        decoded = json.loads(response_text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return validate_ai_result(decoded)
+
+
+class OllamaProvider:
+    """Small replaceable boundary around the local Ollama transport."""
+
+    def __init__(self, url=OLLAMA_API_URL, model=OLLAMA_MODEL, session=requests):
+        self.url = url
+        self.model = model
+        self.session = session
+
+    def process(self, text):
+        prompt = f"""
 You are a highly professional technology journalist and SEO expert.
 Read the following news article excerpt.
 
@@ -47,7 +275,7 @@ The tone in both languages must be similar, professional, and journalistic.
 
 CRITICAL RULES:
 - NEVER use emojis anywhere in your response. Not a single one.
-- Output ONLY valid JSON. Do not use markdown blocks like ```json.
+- Output ONLY valid JSON. Do not use markdown blocks.
 - The JSON structure MUST strictly follow this exact format:
 {{
     "title_en": "SEO rewritten english title",
@@ -59,80 +287,204 @@ CRITICAL RULES:
 Article Excerpt:
 {text}
 """
-    payload = {
-        "model": "llama3:latest",
-        "prompt": prompt,
-        "format": "json",
-        "stream": False
-    }
-    
-    try:
-        response = requests.post(OLLAMA_API_URL, json=payload, timeout=300) # 5 min timeout for heavy processing
-        response.raise_for_status()
-        result = response.json()
-        return json.loads(result["response"])
-    except Exception as e:
-        print(f"[ERROR] Failed to process via Ollama: {e}")
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "format": "json",
+            "stream": False,
+        }
+        for attempt in range(MAX_RETRIES + 1):
+            try:
+                response = self.session.post(self.url, json=payload, timeout=AI_TIMEOUT_SECONDS)
+                response.raise_for_status()
+                return decode_ollama_response(response.json())
+            except (requests.RequestException, ValueError) as exc:
+                if attempt >= MAX_RETRIES:
+                    print(f"[ERROR] AI provider unavailable after retries: {exc}")
+                    return None
+                time.sleep(0.5 * (attempt + 1))
         return None
+
+
+def fetch_feed(feed_url, resolver=socket.getaddrinfo, transport=pinned_feed_request):
+    """Fetch one external feed while pinning every request to a validated public IP."""
+    last_error = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            current_url = feed_url
+            for redirect_count in range(MAX_REDIRECTS + 1):
+                current_url, approved_addresses = resolve_feed_target(
+                    current_url, resolver=resolver
+                )
+                response = transport(current_url, approved_addresses[0])
+                status_code = response.status_code
+
+                if status_code in REDIRECT_STATUSES:
+                    if redirect_count >= MAX_REDIRECTS:
+                        raise ValueError("Feed redirect limit exceeded")
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise ValueError("Feed redirect is missing Location header")
+                    current_url = urljoin(current_url, location)
+                    continue
+
+                response.raise_for_status()
+                parsed = feedparser.parse(response.content)
+                if getattr(parsed, "bozo", False):
+                    raise ValueError(
+                        f"Malformed feed: {getattr(parsed, 'bozo_exception', 'parse error')}"
+                    )
+                return parsed
+
+            raise ValueError("Feed redirect limit exceeded")
+        except (FeedTransportError, ValueError) as exc:
+            last_error = exc
+            if attempt < MAX_RETRIES:
+                time.sleep(0.5 * (attempt + 1))
+    raise RuntimeError(f"Feed unavailable after retries: {feed_url}: {last_error}")
+
+
+def atomic_write_json(path, value):
+    """Persist JSON using same-directory atomic replacement."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(f".{target.name}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8") as file_handle:
+            json.dump(value, file_handle, indent=4, ensure_ascii=False)
+            file_handle.flush()
+            os.fsync(file_handle.fileno())
+        temporary.replace(target)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
+def load_pending_batch(path):
+    """Load an existing untransferred Harvester batch and fail closed if corrupt."""
+    target = Path(path)
+    if not target.exists():
+        return []
+    with target.open("r", encoding="utf-8") as file_handle:
+        payload = json.load(file_handle)
+    if not isinstance(payload, list):
+        raise ValueError("existing Harvester output must be a JSON array")
+    return payload
+
+
+def merge_pending_items(existing, new_items):
+    """Preserve prior work and deduplicate by durable source URL."""
+    merged = []
+    seen = set()
+    for item in [*existing, *new_items]:
+        if not isinstance(item, dict) or not valid_source_url(item.get("source_url")):
+            raise ValueError("existing/new Harvester queue contains an invalid item")
+        identity = item["source_url"].strip()
+        if identity in seen:
+            continue
+        seen.add(identity)
+        merged.append(item)
+    return merged
+
+
+def persist_pending_batch(path, new_items):
+    """Merge with any untransferred batch under an advisory process lock."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_name(f".{target.name}.lock")
+    with lock_path.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            existing = load_pending_batch(target)
+            merged = merge_pending_items(existing, new_items)
+            atomic_write_json(target, merged)
+            return merged
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def harvest(categories, provider=None, now=None, feed_loader=fetch_feed):
+    """Run deterministic orchestration while isolating every external feed."""
+    provider = provider or OllamaProvider()
+    now_utc = now or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    cutoff_date = now_utc.astimezone(timezone.utc) - timedelta(hours=HOURS_LIMIT)
+    processed_news = []
+
+    for category, feeds in categories.items():
+        for feed_url in feeds:
+            print(f"  -> Polling: {feed_url} [{category}]")
+            try:
+                feed = feed_loader(feed_url)
+            except Exception as exc:
+                print(f"     [ERROR] Failed to fetch feed {feed_url}: {exc}")
+                continue
+
+            count = 0
+            for entry in getattr(feed, "entries", []):
+                if count >= MAX_PER_FEED:
+                    break
+
+                pub_date = parse_date(entry)
+                if pub_date is None:
+                    print("     [SKIP] Missing or invalid publication date.")
+                    continue
+                if pub_date < cutoff_date:
+                    continue
+
+                source_url = getattr(entry, "link", None)
+                if not valid_source_url(source_url):
+                    print("     [SKIP] Missing or invalid source URL.")
+                    continue
+
+                entry_title = getattr(entry, "title", "Untitled")
+                content = getattr(entry, "summary", entry_title)
+                clean_content = clean_html(content)[:2500]
+                if not clean_content:
+                    print("     [SKIP] Empty article content after normalization.")
+                    continue
+
+                ai_result = provider.process(clean_content)
+                if ai_result:
+                    processed_news.append(
+                        {
+                            "category": category,
+                            "source_name": getattr(
+                                getattr(feed, "feed", None), "title", "Unknown Source"
+                            ),
+                            "source_url": source_url.strip(),
+                            **ai_result,
+                        }
+                    )
+                    count += 1
+
+    return processed_news
+
 
 def main():
     print("[1/3] Loading feeds configuration...")
     try:
-        with open(FEEDS_FILE, 'r', encoding='utf-8') as f:
-            categories = json.load(f)
-    except FileNotFoundError:
-        print(f"[FATAL] {FEEDS_FILE} not found.")
-        return
-
-    cutoff_date = datetime.now() - timedelta(hours=HOURS_LIMIT)
-    processed_news = []
+        with open(FEEDS_FILE, "r", encoding="utf-8") as file_handle:
+            categories = json.load(file_handle)
+        if not isinstance(categories, dict):
+            raise ValueError("feeds configuration must be an object")
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"[FATAL] Could not load {FEEDS_FILE}: {exc}")
+        return 1
 
     print("[2/3] Starting RSS Harvesting and AI Processing...")
-    for category, feeds in categories.items():
-        for feed_url in feeds:
-            print(f"  -> Polling: {feed_url} [{category}]")
-            
-            try:
-                feed = feedparser.parse(feed_url)
-            except Exception as e:
-                print(f"     [ERROR] Failed to fetch feed {feed_url}: {e}")
-                continue
-                
-            count = 0
-            
-            for entry in feed.entries:
-                if count >= MAX_PER_FEED:
-                    break
-                    
-                pub_date = parse_date(entry)
-                if pub_date < cutoff_date:
-                    continue
-                
-                print(f"     + Processing: {entry.title}")
-                content = entry.summary if hasattr(entry, 'summary') else entry.title
-                clean_content = clean_html(content)[:2500] # Cap at 2500 chars to avoid memory exhaustion
-                
-                ai_result = call_ollama(clean_content)
-                if ai_result:
-                    article_data = {
-                        "category": category,
-                        "source_name": feed.feed.title if hasattr(feed.feed, 'title') else "Unknown Source",
-                        "source_url": entry.link,
-                        "title_en": ai_result.get("title_en", entry.title),
-                        "title_pt": ai_result.get("title_pt", ""),
-                        "summary_en": ai_result.get("summary_en", ""),
-                        "summary_pt": ai_result.get("summary_pt", "")
-                    }
-                    processed_news.append(article_data)
-                    count += 1
-                
-                time.sleep(2) # Give the GPU/RAM a brief cooldown
+    processed_news = harvest(categories)
 
-    print(f"[3/3] Harvesting complete. Saving {len(processed_news)} articles...")
-    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        json.dump(processed_news, f, indent=4, ensure_ascii=False)
-        
-    print("Done!")
+    print(f"[3/3] Harvesting complete. Preserving {len(processed_news)} new articles...")
+    try:
+        pending = persist_pending_batch(OUTPUT_FILE, processed_news)
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        print(f"[FATAL] Could not persist durable handoff queue: {exc}")
+        return 1
+    print(f"Done! {len(pending)} total article(s) await transfer.")
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
