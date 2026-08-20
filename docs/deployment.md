@@ -1,6 +1,6 @@
 # Deployment and clean-room runtime contract
 
-Little Mere News is a hybrid system. The Next.js portal, Supabase/PostgreSQL, Python jobs and optional local AI/Hyper-V infrastructure are separate runtime boundaries. Critical CI deliberately does not require production credentials, live feeds, GPU, Ollama or the original home-lab topology.
+Little Mere News is a hybrid system. The Next.js portal, Supabase/PostgreSQL, Python jobs, AI provider boundary and optional Hyper-V/local Ollama topology are separate runtime boundaries. Frontend operation, builds, critical CI, deterministic tests, and clean-room verification do not require production credentials, live feeds, GPU, Ollama or the original home-lab topology. The normal Harvester article-generation path, however, requires a valid AI response to produce a new article payload.
 
 ## Component map
 
@@ -29,7 +29,7 @@ npm run build
 npm run start -- -H 0.0.0.0 -p 3000
 ```
 
-`GET /api/health` proves Next.js process liveness only. It is not a readiness assertion for Supabase, Python jobs, Ollama or external feeds.
+`GET /api/health` proves Next.js process liveness only. It is not a readiness assertion for Supabase, Python jobs, an AI provider or external feeds.
 
 ### Supabase/PostgreSQL
 
@@ -45,14 +45,20 @@ There is no browser self-enrollment path for administrator membership. Productio
 
 ### Harvester
 
-`Backend-Harvester/` loads configured external feeds, normalizes untrusted content and optionally invokes the local AI provider boundary.
+`Backend-Harvester/` fetches and parses configured RSS/Atom feeds, applies freshness/source validation, normalizes feed-summary text, and requires a valid AI response to produce a new article payload. The current Harvester does not download full publisher article pages and does not provide a raw-content or non-AI generation fallback.
 
 Important runtime variables:
 
 - `LMN_FEEDS_FILE` — feed configuration path;
 - `LMN_OUTPUT_FILE` — **Harvester-owned mutable pending pathname**;
-- `OLLAMA_API_URL` — optional provider endpoint;
+- `OLLAMA_API_URL` — configurable provider endpoint;
 - `OLLAMA_MODEL` — provider model identifier.
+
+`OLLAMA_API_URL` makes provider locality deployment-dependent. The documented Ollama/Brain topology is local by default, but the repository does not architecturally guarantee that inference remains local.
+
+Each Harvester invocation is a finite batch pass. The repository does not contain a continuous polling loop or a versioned ingestion scheduler. The 24-hour window is a freshness filter, not an ingestion cadence; `Infrastructure/Run-LMN-Batch.ps1` orchestrates a batch, and frontend revalidation is independent of ingestion scheduling.
+
+AI output can contain factual errors or hallucinations, omit context, or drift during paraphrase, translation, or localization. Structured-output validation checks payload structure rather than factual accuracy, and there is no independent fact-checking stage. Feed excerpts or truncation can limit context; the original source remains the reference for complete context.
 
 The Harvester merges new validated articles with existing pending work under an advisory file lock and atomically replaces the pending file only while it still owns that pending pathname. Malformed existing pending state fails closed.
 
@@ -167,7 +173,7 @@ The checked-in requirements files are therefore the shared reviewed direct-depen
 
 ### Optional Ollama bootstrap
 
-Ollama remains optional and is not a critical CI dependency. The reviewed guest setup no longer downloads and executes the mutable `https://ollama.com/install.sh` endpoint.
+The repository-provided local Ollama bootstrap is optional and is not a critical CI dependency. A normal Harvester article-generation pass nevertheless requires a valid AI response from the configured `OLLAMA_API_URL`; a deployment may satisfy that provider boundary without using this local bootstrap. The reviewed guest setup no longer downloads and executes the mutable `https://ollama.com/install.sh` endpoint.
 
 `Infrastructure/setup_ollama.sh` currently records:
 
@@ -220,24 +226,25 @@ A deployment smoke should verify, as applicable:
 - public reads reach the intended Supabase project;
 - ordinary authenticated users cannot enter CMS and intended admins can;
 - RLS remains enabled and migrations match the reviewed repository state;
-- Harvester provider/feed connectivity is checked separately when enabled;
+- Harvester provider/feed connectivity is checked separately before a content-generation pass;
 - a controlled Harvester pending → claim → Publisher inbox → processing handoff preserves newer pending/inbox work;
 - an intentionally interrupted claimed batch is recoverable after restart;
 - retained retry state survives a later inbound batch;
 - quarantine remains durable and requires operator review;
 - Hyper-V deployments reject untrusted SSH host keys and load Publisher secrets only from the trusted Publisher-side environment file;
 - guest Python bootstrap reports installed top-level versions matching the reviewed requirements and `pip check` succeeds;
-- optional Ollama bootstrap reports the reviewed runtime version and verifies the reviewed model identifier before creating the local runtime alias.
+- local Ollama deployments report the reviewed runtime version and verify the reviewed model identifier before creating the local runtime alias.
 
 ## What remains intentionally external/manual
 
 Pull-request CI does not provision or mutate production Supabase, VM host identities, SSH credentials, Hyper-V hosts, GPU drivers or local model runtimes. These require environment-specific operator actions.
 
-The optional local AI runtime is not part of the critical CI guarantee. Its version/checksum/model-identifier checks reduce silent drift in the documented VM path, but upstream package/model provenance remains an external trust boundary.
+A local AI runtime is not part of the critical CI guarantee. When a deployment uses the repository-provided local Ollama path, its version/checksum/model-identifier checks reduce silent drift, but upstream package/model provenance remains an external trust boundary. The normal Harvester generation path still requires a valid response from whichever `OLLAMA_API_URL` provider that deployment configures.
 
 ## Residual operational risks
 
 - external feeds can change or disappear;
+- AI output can be factually wrong, incomplete, or affected by paraphrase/translation/localization drift; structural validation is not factual verification;
 - advisory/vulnerability databases can lag undisclosed issues;
 - production data can expose migration conflicts absent from disposable test data;
 - queue durability assumes the filesystem honors the atomic same-filesystem rename/link primitives used by the claim/spool helpers;

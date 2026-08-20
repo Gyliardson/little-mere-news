@@ -3,11 +3,9 @@ name: CI
 on:
   push:
     branches:
-      - portfolio/revamp-2026
       - 'work/**'
   pull_request:
     branches:
-      - portfolio/revamp-2026
       - main
 
 permissions:
