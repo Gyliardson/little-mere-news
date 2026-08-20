@@ -3,7 +3,7 @@
 [![en](https://img.shields.io/badge/lang-en-red.svg)](README.md)
 [![pt-br](https://img.shields.io/badge/lang-pt--br-green.svg)](README.pt-br.md)
 
-Little Mere News is a bilingual technology-news platform that combines a Next.js portal and CMS, a Python ingestion/processing pipeline, Supabase/PostgreSQL, and optional local AI inference through Ollama. The project is designed as a hybrid local/cloud system while keeping its critical test path independent from domestic GPU, Hyper-V, Ollama, live feeds, and a production Supabase project.
+Little Mere News is a bilingual technology-news platform that combines a Next.js portal and CMS, a Python ingestion/processing pipeline, Supabase/PostgreSQL, and an Ollama-compatible AI provider boundary for Harvester article generation. The documented Ollama topology is local by default, but the provider endpoint is configurable. Frontend operation, builds, CI, deterministic tests, and clean-room verification do not require AI/Ollama; the normal Harvester article-generation path does require a valid AI response to produce a new article payload.
 
 ## Architecture
 
@@ -21,7 +21,7 @@ flowchart LR
 The repository contains:
 
 - `frontend-web/` — Next.js App Router portal and administrative CMS;
-- `Backend-Harvester/` — source ingestion and local AI processing;
+- `Backend-Harvester/` — RSS/Atom feed ingestion and AI-backed article generation;
 - `Backend-Publisher/` — validated, retry-safe publishing to Supabase;
 - `supabase/migrations/` — versioned database schema, constraints and RLS policies;
 - `supabase/tests/` — deterministic PostgreSQL security/contract tests;
@@ -33,11 +33,15 @@ The repository contains:
 
 ## Content pipeline
 
-The intended data flow is:
+The current data flow is:
 
-`source → scrape/parse → normalize → AI/process → validate → persist queue → publish → frontend`
+`configured RSS/Atom feeds → bounded feed fetch/parse → freshness/source validation → feed-summary normalization → AI generation → structured-output validation → durable Harvester queue → Publisher → Supabase/PostgreSQL → frontend`
 
-External source content is treated as untrusted and mutable. Critical tests use deterministic fixtures instead of requiring live feeds. AI output is validated before it can enter the publish path, and publisher retries preserve failed items instead of deleting the only copy after a partial failure.
+The Harvester processes configured feed data; it does not download full publisher article pages. Each Harvester invocation performs a finite batch pass. The repository does not version a continuous polling loop or an ingestion scheduler: the 24-hour window is a freshness filter, `Infrastructure/Run-LMN-Batch.ps1` is a batch orchestrator, and frontend revalidation is not an ingestion cadence.
+
+Normal Harvester article generation has no raw-content or non-AI generation fallback. `OLLAMA_API_URL` is configurable, so "local AI" describes the default deployment convention rather than an architectural guarantee that inference remains local. AI output can contain factual errors or hallucinations, omit context, or drift during paraphrase, translation, or localization. Structured-output validation checks payload structure, not factual accuracy, and the repository does not implement independent fact-checking. Feed excerpts or truncation can further limit context; the original source remains the reference for complete context.
+
+External source content is treated as untrusted and mutable. Critical tests use deterministic fixtures instead of requiring live feeds. AI output is structurally validated before it can enter the publish path, and publisher retries preserve failed items instead of deleting the only copy after a partial failure.
 
 ## Security model
 
@@ -111,11 +115,11 @@ To grant administrative access in an environment, insert the intended authentica
 
 ### Optional local infrastructure
 
-`Infrastructure/` contains the original Windows/Hyper-V orchestration for the local Harvester/Brain/Publisher topology. It remains a supported deployment option, not a prerequisite for building or testing the repository.
+`Infrastructure/` contains the original Windows/Hyper-V orchestration for the local Harvester/Brain/Publisher topology. It remains a supported deployment option, not a prerequisite for building or testing the repository. The local Ollama topology is also a deployment option; the Harvester provider endpoint itself is configurable.
 
 ## Deployment and clean-room verification
 
-Deployment is intentionally componentized: the Next.js frontend, Supabase/PostgreSQL, Harvester, Publisher, optional Ollama inference and optional Hyper-V orchestration have distinct runtime boundaries. A clean-room validation must start from a fresh checkout, apply the documented environment and database contract, build/start the production frontend, verify `/api/health` as **Next.js process liveness only**, and then run the deterministic test suites. Provider readiness and external-source availability require separate smoke checks.
+Deployment is intentionally componentized: the Next.js frontend, Supabase/PostgreSQL, Harvester, Publisher, AI provider boundary and optional Hyper-V/local Ollama topology have distinct runtime boundaries. A clean-room validation must start from a fresh checkout, apply the documented environment and database contract, build/start the production frontend, verify `/api/health` as **Next.js process liveness only**, and then run the deterministic test suites. Provider readiness and external-feed availability require separate smoke checks.
 
 See [`docs/deployment.md`](docs/deployment.md) for the authoritative runbook and residual operational limitations.
 
@@ -133,8 +137,10 @@ The lightweight static evidence below replaces the former 20+ MB animated walkth
 
 ## Operational limitations
 
-- External publishers and feeds can change markup, metadata, availability, or rate behavior without notice.
-- Local Ollama inference is optional for the production pipeline but deliberately excluded from deterministic CI.
+- External publishers and feeds can change metadata, availability, or rate behavior without notice.
+- Normal Harvester content generation requires a valid AI response. AI/Ollama is not required for the frontend, build, CI, deterministic tests, or clean-room verification, and `OLLAMA_API_URL` makes inference locality deployment-dependent.
+- Harvester executions are finite batches. No scheduler or continuous polling loop is versioned in this repository, and the freshness window must not be interpreted as ingestion cadence.
+- AI output can contain errors, hallucinations, omissions, or paraphrase/translation/localization drift; structural validation is not factual verification and no independent fact-checking is implemented.
 - The browser Supabase fixture is a deterministic contract double, not a replacement for a production-environment smoke test.
 - Dependency scanners depend on upstream advisory data and cannot prove the absence of undisclosed or not-yet-published vulnerabilities.
 - Production Supabase migrations must be reviewed against existing data before deployment; the uniqueness migration intentionally does not silently delete duplicate records.
@@ -142,4 +148,6 @@ The lightweight static evidence below replaces the former 20+ MB animated walkth
 
 ## License
 
-See [LICENSE](LICENSE) for the repository's licensing terms.
+The repository uses the standard MIT License for the software and original project materials to the extent applicable. That license does **not** relicense publisher articles, third-party feed content, third-party trademarks or logos, or external editorial material. Source-specific rights remain subject to the respective terms and rightsholders; consuming an RSS/Atom feed is not, by itself, a statement about republication permission or infringement.
+
+See [LICENSE](LICENSE) for the repository's software licensing terms.

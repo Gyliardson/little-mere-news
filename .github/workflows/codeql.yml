@@ -4,10 +4,8 @@ on:
   push:
     branches:
       - 'work/**'
-      - portfolio/revamp-2026
   pull_request:
     branches:
-      - portfolio/revamp-2026
       - main
 
 permissions:

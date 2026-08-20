@@ -51,7 +51,7 @@ This is not a fully hermetic Python lock: transitive resolution, the Python inte
 
 ## Ollama trust/version boundary
 
-Ollama remains optional and outside critical CI. `setup_ollama.sh` deliberately avoids the mutable `https://ollama.com/install.sh` pipeline previously used by this project.
+The repository-provided local Ollama bootstrap is optional and outside critical CI. The normal Harvester article-generation path still requires a valid AI response, but `OLLAMA_API_URL` is configurable, so using this local Ollama topology is a deployment convention rather than an architectural requirement.
 
 The repository currently reviews:
 

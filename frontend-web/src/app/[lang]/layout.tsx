@@ -19,8 +19,8 @@ export async function generateMetadata({ params }: { params: Promise<{ lang: str
     metadataBase: siteUrl,
     title: { template: "%s | Little Mere News", default: "Little Mere News - Big tech insights from a Little Mere." },
     description: isPt
-      ? "Notícias e insights diários sobre IA, games e desenvolvimento, selecionados de fontes reconhecidas."
-      : "Daily insights and news on AI, Gaming, and Dev, curated from established sources.",
+      ? "Notícias e insights sobre IA, games e desenvolvimento, selecionados de fontes reconhecidas."
+      : "Insights and news on AI, Gaming, and Dev, curated from established sources.",
     alternates: { canonical: `/${lang}`, languages: { en: "/en", pt: "/pt" } },
     icons: { icon: "/favicon.ico" },
   };
