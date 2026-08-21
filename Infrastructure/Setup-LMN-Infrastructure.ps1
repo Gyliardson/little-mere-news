@@ -56,7 +56,7 @@ $VMDefinitions = @(
         MemoryMB   = 2048        # 2 GB
         VCPUs      = 2
         DiskSizeGB = 30
-        Role       = "Data collection via RSS/APIs"
+        Role       = "Data collection via configured RSS/Atom feeds"
     },
     @{
         Name       = "LMN-Brain"
