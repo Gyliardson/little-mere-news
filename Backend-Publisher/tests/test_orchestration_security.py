@@ -2,7 +2,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 ORCHESTRATOR = ROOT / "Infrastructure" / "Run-LMN-Batch.ps1"
-DEPLOYMENT = ROOT / "docs" / "deployment.md"
+DEPLOYMENT = ROOT / "docs" / "operations" / "DEPLOYMENT.md"
 ROOT_ENV_EXAMPLE = ROOT / ".env.example"
 
 
