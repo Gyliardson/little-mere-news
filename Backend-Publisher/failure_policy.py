@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from postgrest.exceptions import APIError
 
 RETRYABLE_HTTP_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 # postgrest-py APIError preserves the JSON body `code`, not necessarily the HTTP
@@ -36,10 +37,18 @@ def provider_http_status(exc: Exception) -> int | None:
     if isinstance(exc, httpx.HTTPStatusError):
         return _coerce_http_status(exc.response.status_code)
 
-    for attribute in ("status_code", "status", "code"):
+    for attribute in ("status_code", "status"):
         status = _coerce_http_status(getattr(exc, attribute, None))
         if status is not None:
             return status
+
+    # In the pinned postgrest client, malformed/nonconforming error responses use
+    # generate_default_error_message(), which stores the HTTP response status as an
+    # integer APIError.code. Valid PostgREST JSON body codes are strings. Recognize
+    # only this concrete integer APIError compatibility shape; arbitrary string
+    # `.code` values remain provider body codes and never become HTTP status evidence.
+    if isinstance(exc, APIError) and isinstance(exc.code, int) and not isinstance(exc.code, bool):
+        return _coerce_http_status(exc.code)
 
     return None
 
