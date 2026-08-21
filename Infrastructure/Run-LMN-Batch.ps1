@@ -110,6 +110,7 @@ $HarvesterClaimSource = Join-Path $ProjectRoot "Backend-Harvester\queue_claim.py
 $PublisherCodeSource = Join-Path $ProjectRoot "Backend-Publisher\main.py"
 $PublisherSpoolSource = Join-Path $ProjectRoot "Backend-Publisher\spool.py"
 $HostLockHelperSource = Join-Path $PSScriptRoot "Lmn-HostLock.ps1"
+$LivenessBoundaryHelperSource = Join-Path $PSScriptRoot "Lmn-LivenessBoundary.ps1"
 $HostTemp = Join-Path ([System.IO.Path]::GetTempPath()) ("lmn-handoff-{0}.json" -f [guid]::NewGuid().ToString("N"))
 
 $RequiredLocalSources = @(
@@ -118,7 +119,8 @@ $RequiredLocalSources = @(
     $HarvesterClaimSource,
     $PublisherCodeSource,
     $PublisherSpoolSource,
-    $HostLockHelperSource
+    $HostLockHelperSource,
+    $LivenessBoundaryHelperSource
 )
 foreach ($sourcePath in $RequiredLocalSources) {
     if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
@@ -129,6 +131,7 @@ foreach ($sourcePath in $RequiredLocalSources) {
 }
 
 . $HostLockHelperSource
+. $LivenessBoundaryHelperSource
 
 $VMs = "LMN-Harvester", "LMN-Brain", "LMN-Publisher"
 $SharedResourceIds = @(
@@ -233,7 +236,7 @@ try {
 
     Write-Host "[3/6] Recovering/draining retained Publisher processing, inbox and retry state..." -ForegroundColor Yellow
     $preflightExit = Invoke-PublisherDrain -SshOptions $SshOptions -PublisherHost $PublisherHost -PublisherSpool $PublisherSpool -PublisherRetry $PublisherRetry -PublisherRejected $PublisherRejected -PublisherEnvCheck $PublisherEnvCheck
-    if ($preflightExit -ne 0) {
+    if (-not (Test-LmnPublisherPreflightAllowsHarvester -PublisherExit $preflightExit)) {
         Write-Host "      [WARN] Publisher reported retained/rejected work or an unsafe queue result (exit $preflightExit)." -ForegroundColor Yellow
         Write-Host "      No new Harvester batch will be created this run; claimed/spooled work remains recoverable." -ForegroundColor Yellow
         Stop-LmnCluster -Names $VMs
