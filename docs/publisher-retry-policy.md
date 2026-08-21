@@ -13,7 +13,7 @@ The cross-run policy permits at most `MAX_RETRY_CYCLES = 8` failed processing cy
 
 A retained item whose `next_attempt_at` is still in the future is persisted unchanged and is **not sent to Supabase** during that invocation. When the lifetime cycle limit is reached, the item leaves active retry state and is moved to the rejected/quarantine queue for explicit operator review.
 
-Legacy retry items without `_lmn_retry` metadata are treated as cycle zero and migrate to the durable format after their next transient failure. Malformed retry metadata fails closed to quarantine rather than silently resetting the budget.
+Legacy retry items without `_lmn_retry` metadata are treated as cycle zero and migrate to the durable format after their next transient failure. Once `_lmn_retry` is present, active durable metadata must carry an integer `cycles` value in the writer-reachable range `1 <= cycles < MAX_RETRY_CYCLES`; `first_failed_at` when non-null and `next_attempt_at` must be real finite numeric values, with booleans excluded. Non-finite timestamps, overflowing numeric state, persisted cycle zero, and cycle counts at or beyond the lifetime boundary are corrupt/impossible active state and fail closed to quarantine. They do not receive a reset budget, timestamp repair, retry-queue entry, or provider call.
 
 ## Automatically retried
 
@@ -57,6 +57,8 @@ Quarantine remains fail-closed and causes a non-zero Publisher exit so orchestra
 
 - the existing three-attempt in-process bound;
 - durable retry metadata creation;
+- finite durable retry timestamps and writer-reachable active cycle counts;
+- JSON overflow and Python-decoder non-finite values failing closed without provider calls;
 - deterministic cross-run pacing;
 - no provider call before `next_attempt_at`;
 - lifetime exhaustion into quarantine instead of budget reset;

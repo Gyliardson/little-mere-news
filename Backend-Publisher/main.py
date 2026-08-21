@@ -1,5 +1,6 @@
 import fcntl
 import json
+import math
 import os
 import time
 from contextlib import contextmanager
@@ -115,6 +116,18 @@ def validate_item(item):
     return normalized
 
 
+def _finite_retry_number(value, field_name):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Publisher retry {field_name} must be numeric")
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError(f"Publisher retry {field_name} must be finite") from exc
+    if not math.isfinite(normalized):
+        raise ValueError(f"Publisher retry {field_name} must be finite")
+    return normalized
+
+
 def retry_metadata(raw_item):
     """Return validated durable retry metadata, defaulting legacy queue items to cycle zero."""
     if not isinstance(raw_item, dict):
@@ -127,16 +140,23 @@ def retry_metadata(raw_item):
     cycles = metadata.get("cycles", 0)
     first_failed_at = metadata.get("first_failed_at")
     next_attempt_at = metadata.get("next_attempt_at", 0.0)
-    if isinstance(cycles, bool) or not isinstance(cycles, int) or cycles < 0:
-        raise ValueError("Publisher retry cycles must be a non-negative integer")
-    if first_failed_at is not None and not isinstance(first_failed_at, (int, float)):
-        raise ValueError("Publisher retry first_failed_at must be numeric")
-    if not isinstance(next_attempt_at, (int, float)):
-        raise ValueError("Publisher retry next_attempt_at must be numeric")
+    if (
+        isinstance(cycles, bool)
+        or not isinstance(cycles, int)
+        or cycles < 1
+        or cycles >= MAX_RETRY_CYCLES
+    ):
+        raise ValueError(
+            "Publisher retry cycles must be an active integer between 1 and "
+            f"{MAX_RETRY_CYCLES - 1}"
+        )
+    if first_failed_at is not None:
+        first_failed_at = _finite_retry_number(first_failed_at, "first_failed_at")
+    next_attempt_at = _finite_retry_number(next_attempt_at, "next_attempt_at")
     return {
         "cycles": cycles,
         "first_failed_at": first_failed_at,
-        "next_attempt_at": float(next_attempt_at),
+        "next_attempt_at": next_attempt_at,
     }
 
 
@@ -146,7 +166,11 @@ def with_retry_metadata(item, metadata):
 
 def next_retry_metadata(previous, now):
     cycles = previous["cycles"] + 1
-    delay = min(RETRY_CYCLE_BASE_SECONDS * (2 ** max(cycles - 1, 0)), RETRY_CYCLE_MAX_SECONDS)
+    delay = RETRY_CYCLE_BASE_SECONDS
+    remaining_doublings = max(cycles - 1, 0)
+    while remaining_doublings and delay < RETRY_CYCLE_MAX_SECONDS:
+        delay = min(delay * 2, RETRY_CYCLE_MAX_SECONDS)
+        remaining_doublings -= 1
     return {
         "cycles": cycles,
         "first_failed_at": previous["first_failed_at"] if previous["first_failed_at"] is not None else now,

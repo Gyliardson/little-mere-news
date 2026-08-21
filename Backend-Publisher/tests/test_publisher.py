@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -71,6 +72,18 @@ def configure_paths(monkeypatch, tmp_path):
     monkeypatch.setenv("LMN_REJECTED_FILE", str(rejected_file))
     monkeypatch.setattr(publisher, "RETRY_BACKOFF_SECONDS", 0)
     return input_file, retry_file, rejected_file
+
+
+def assert_retry_metadata_rejected(metadata):
+    raw = publisher.with_retry_metadata(valid_item(), metadata)
+    client = FakeClient([])
+    counts, retry_queue, rejected = publisher.process_batch(
+        client, [raw], sleep_fn=lambda _: None, now_fn=lambda: 1000.0
+    )
+    assert counts["invalid"] == 1
+    assert retry_queue == []
+    assert rejected == [valid_item()]
+    assert client.query.items == []
 
 
 def test_queue_paths_preserve_defaults_and_accept_portable_overrides(tmp_path):
@@ -180,6 +193,95 @@ def test_retry_metadata_is_fail_closed_when_corrupt():
     assert counts["invalid"] == 1
     assert retry_queue == []
     assert rejected == [valid_item()]
+
+
+@pytest.mark.parametrize("field", ["first_failed_at", "next_attempt_at"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), True, 10**1000])
+def test_non_finite_overflowing_and_bool_retry_timestamps_fail_closed(field, value):
+    metadata = {"cycles": 1, "first_failed_at": 100.0, "next_attempt_at": 0.0}
+    metadata[field] = value
+    assert_retry_metadata_rejected(metadata)
+
+
+@pytest.mark.parametrize(
+    "cycles",
+    [False, 0, -1, 1.0, publisher.MAX_RETRY_CYCLES, publisher.MAX_RETRY_CYCLES + 1, 10**1000],
+)
+def test_impossible_or_non_integer_persisted_cycles_fail_closed(cycles):
+    assert_retry_metadata_rejected(
+        {"cycles": cycles, "first_failed_at": 100.0, "next_attempt_at": 0.0}
+    )
+
+
+def test_json_overflowing_number_is_quarantined_after_actual_queue_parse(tmp_path):
+    raw = publisher.with_retry_metadata(
+        valid_item(),
+        {"cycles": 1, "first_failed_at": 100.0, "next_attempt_at": 0.0},
+    )
+    payload = json.dumps([raw]).replace('"next_attempt_at": 0.0', '"next_attempt_at": 1e309')
+    queue_file = tmp_path / "retry.json"
+    queue_file.write_text(payload, encoding="utf-8")
+
+    loaded = publisher.load_queue(queue_file)
+    assert math.isinf(loaded[0][publisher.RETRY_METADATA_KEY]["next_attempt_at"])
+
+    client = FakeClient([])
+    counts, retry_queue, rejected = publisher.process_batch(client, loaded, now_fn=lambda: 1000.0)
+    assert counts["invalid"] == 1
+    assert retry_queue == []
+    assert rejected == [valid_item()]
+    assert client.query.items == []
+
+
+@pytest.mark.parametrize("token", ["NaN", "Infinity", "-Infinity"])
+def test_python_json_non_finite_tokens_fail_closed_when_decoder_accepts_them(tmp_path, token):
+    raw = publisher.with_retry_metadata(
+        valid_item(),
+        {"cycles": 1, "first_failed_at": 100.0, "next_attempt_at": 0.0},
+    )
+    payload = json.dumps([raw]).replace('"next_attempt_at": 0.0', f'"next_attempt_at": {token}')
+    queue_file = tmp_path / "retry.json"
+    queue_file.write_text(payload, encoding="utf-8")
+
+    loaded = publisher.load_queue(queue_file)
+    assert not math.isfinite(loaded[0][publisher.RETRY_METADATA_KEY]["next_attempt_at"])
+    assert_retry_metadata_rejected(loaded[0][publisher.RETRY_METADATA_KEY])
+
+
+def test_legacy_item_without_retry_metadata_remains_accepted():
+    client = FakeClient([[{"id": 1}]])
+    counts, retry_queue, rejected = publisher.process_batch(
+        client, [valid_item()], now_fn=lambda: 1000.0
+    )
+    assert counts["published"] == 1
+    assert retry_queue == []
+    assert rejected == []
+    assert len(client.query.items) == 1
+
+
+def test_valid_application_generated_retry_metadata_remains_accepted():
+    generated = publisher.next_retry_metadata(
+        {"cycles": 0, "first_failed_at": None, "next_attempt_at": 0.0},
+        1000.0,
+    )
+    retained = publisher.with_retry_metadata(valid_item(), generated)
+    client = FakeClient([])
+    counts, retry_queue, rejected = publisher.process_batch(
+        client, [retained], now_fn=lambda: 1000.0
+    )
+    assert counts["deferred"] == 1
+    assert retry_queue == [retained]
+    assert rejected == []
+    assert client.query.items == []
+
+
+def test_next_retry_metadata_caps_pathological_cycles_without_large_exponent():
+    updated = publisher.next_retry_metadata(
+        {"cycles": 10**1000, "first_failed_at": 100.0, "next_attempt_at": 0.0},
+        1000.0,
+    )
+    assert updated["cycles"] == 10**1000 + 1
+    assert updated["next_attempt_at"] == 1000.0 + publisher.RETRY_CYCLE_MAX_SECONDS
 
 
 def test_deferred_retry_does_not_call_provider_or_block_other_item():
