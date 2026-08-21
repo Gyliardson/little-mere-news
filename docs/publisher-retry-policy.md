@@ -24,9 +24,13 @@ The following failures are eligible for the bounded retry policy:
 - an explicitly exposed HTTP status of `408`, `429`, `500`, `502`, `503`, or `504`;
 - PostgREST body code `PGRST003`, which PostgREST documents as the HTTP 504 timeout while waiting for a database-pool connection.
 
-HTTP status metadata may come from `httpx.HTTPStatusError.response.status_code` or provider `status_code`/`status` attributes. A three-digit numeric `code` is also accepted when a provider explicitly uses that field as an HTTP status.
+HTTP status metadata may come from `httpx.HTTPStatusError.response.status_code` or provider `status_code`/`status` attributes. A generic exception `.code` is **not** accepted as HTTP status evidence merely because it contains a three-digit number.
 
-`postgrest-py` valid-JSON errors are different: `APIError` preserves the PostgREST response body's `code`, while the original HTTP status is not necessarily retained on the exception. The retry policy therefore has a narrow body-code allowlist. `PGRST003` is allowed because its semantics are explicitly transient; the policy does not infer that every PostgREST error mapped to HTTP 5xx is safe to retry.
+The pinned PostgREST client has one narrower compatibility shape for malformed/nonconforming error responses: its `generate_default_error_message()` fallback constructs `postgrest.exceptions.APIError` with the original `response.status_code` stored as an **integer** `.code`. The policy recognizes only that concrete integer-`APIError.code` fallback as HTTP status metadata. It does not extend that rule to arbitrary providers or string body codes.
+
+`postgrest-py` valid-JSON errors are different: `APIError` preserves the PostgREST response body's `code`, while the original HTTP status is not necessarily retained on the exception. Those body codes remain provider error metadata. In particular, string values such as `"503"` or `"504"` are not promoted to transport status solely because they look numeric.
+
+The retry policy therefore has a narrow body-code allowlist. `PGRST003` is allowed because its semantics are explicitly transient; the policy does not infer that every PostgREST error mapped to HTTP 5xx is safe to retry. Unknown body codes, including numeric-looking strings, fail closed.
 
 For example, `PGRST000` can represent an incorrect database URI/configuration even though PostgREST maps it to HTTP 503. It remains fail-closed unless the provider boundary later supplies stronger structured evidence.
 
@@ -49,6 +53,8 @@ Other failures are permanent for automatic processing and go to quarantine for o
 
 PostgreSQL SQLSTATE values are **not** HTTP statuses. For example, RLS SQLSTATE `42501` is five digits and is never interpreted as HTTP `425`. PostgREST body codes such as `PGRST000` and `PGRSTX00` are likewise not retried merely because PostgREST maps them to 5xx. Ordinary `400`, `401`, `403`, `404`, `409`, `422`, `501`, and other unlisted HTTP responses remain non-retryable by default.
 
+Free-form `message`, `details`, and `hint` fields never drive retry classification, even when they contain text such as `timeout`, `temporary`, `server error`, `503`, or `504`. Exception strings are not scanned for numeric statuses or retry keywords.
+
 Quarantine remains fail-closed and causes a non-zero Publisher exit so orchestration/operator state cannot silently ignore auth/schema/validation defects.
 
 ## Deterministic verification
@@ -65,4 +71,4 @@ Quarantine remains fail-closed and causes a non-zero Publisher exit so orchestra
 - permanent/auth/schema-style failures remaining quarantine-signaled;
 - queue ownership, idempotent publication, and atomic retry persistence contracts.
 
-`Backend-Publisher/tests/test_provider_failure_policy.py` separately exercises the installed `postgrest.exceptions.APIError` shape, proves `PGRST003` remains retryable despite the absent HTTP-status attribute, and proves RLS/configuration/internal body codes remain fail-closed. No live Supabase service is required for these provider-shape regressions.
+`Backend-Publisher/tests/test_provider_failure_policy.py` separately exercises the installed `postgrest.exceptions.APIError` shape, proves `PGRST003` remains retryable despite the absent HTTP-status attribute, proves string body codes such as `"503"`/`"504"` do not become HTTP status, covers the concrete malformed-response integer-status fallback, and proves free-form error text plus RLS/configuration/internal body codes remain fail-closed. No live Supabase service is required for these provider-shape regressions.
