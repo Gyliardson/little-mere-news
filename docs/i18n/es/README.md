@@ -23,7 +23,7 @@ El repositorio separa la ingestión de fuentes, la generación asistida por IA, 
 
 | Ingestión determinista de feeds | Límite explícito de IA / editorial | Integridad duradera de publicación |
 | --- | --- | --- |
-| Fetches RSS/Atom acotados, validación de fuente/frescura, lotes finitos del Harvester y fixtures deterministas mantienen la verificación crítica independiente de feeds reales. | La generación por IA es explícita y configurable; la validación de esquema limita la forma del payload sin afirmar verificación factual. | La identidad inmutable del handoff, los retries/cuarentena acotados y la unicidad de base de datos protegen el trabajo ante crashes, reintentos y replay. |
+| Consultas RSS/Atom acotadas, validación de fuente/vigencia, lotes finitos del Harvester y datos de prueba deterministas mantienen la verificación crítica independiente de feeds reales. | La generación por IA es explícita y configurable; la validación de esquema limita la forma del payload sin afirmar verificación factual. | La identidad inmutable de transferencia, los reintentos/cuarentena acotados y la unicidad de base de datos protegen el trabajo ante fallos abruptos, reintentos y reprocesamiento. |
 
 ## Capacidades principales
 
@@ -31,10 +31,10 @@ El repositorio separa la ingestión de fuentes, la generación asistida por IA, 
 - payloads bilingües inglés/portugués generados a partir de **resúmenes de feeds** RSS/Atom configurados;
 - ejecución finita del Harvester con transporte externo acotado y controles de destino orientados a mitigar SSRF;
 - límite configurable de proveedor de IA compatible con Ollama para la generación normal de artículos;
-- claims duraderos del Harvester y ownership de inbox/processing del Publisher;
-- retry acotado del Publisher, cuarentena duradera, idempotencia por `source_url` segura ante replay y upsert;
-- Supabase Auth, membership explícita en `public.admin_users`, autorización server-side y PostgreSQL RLS;
-- gates deterministas de frontend, Python, PostgreSQL, navegador, dependencias, secret scanning y CodeQL.
+- control duradero de la posesión de trabajos del Harvester y de los estados inbox/processing del Publisher;
+- reintentos acotados del Publisher, cuarentena duradera, idempotencia por `source_url` segura ante reprocesamiento y upsert;
+- Supabase Auth, pertenencia explícita a `public.admin_users`, autorización del lado del servidor y PostgreSQL RLS;
+- controles deterministas de frontend, Python, PostgreSQL, navegador, dependencias, detección de secretos y CodeQL.
 
 ## Arquitectura
 
@@ -43,31 +43,31 @@ flowchart LR
     Feeds["Feeds RSS / Atom configurados"] --> Harvester["Harvester Python<br/>lote finito y acotado"]
     Harvester --> AI["Proveedor de IA configurable<br/>límite compatible con Ollama"]
     AI --> Validate["Validación de salida estructurada"]
-    Validate --> Queue["Handoff duradero<br/>spool del Publisher"]
-    Queue --> Publisher["Publisher Python<br/>retry + upsert idempotente"]
+    Validate --> Queue["Transferencia duradera<br/>spool del Publisher"]
+    Queue --> Publisher["Publisher Python<br/>reintentos + upsert idempotente"]
     Publisher --> DB[(Supabase / PostgreSQL)]
     DB --> Portal["Portal Next.js SSR"]
     DB --> CMS["CMS administrativo"]
 ```
 
-El Harvester procesa los datos de feeds configurados en lugar de descargar las páginas completas de los artículos de los publishers. El estado y la autorización de la base de datos se versionan en `supabase/`, mientras que la topología opcional Hyper-V/Ollama sigue siendo una opción de despliegue y no un requisito arquitectónico.
+El Harvester procesa los datos de feeds configurados en lugar de descargar las páginas completas de los artículos de las fuentes editoras. El estado y la autorización de la base de datos se versionan en `supabase/`, mientras que la topología opcional Hyper-V/Ollama sigue siendo una opción de despliegue y no un requisito arquitectónico.
 
 ## Pipeline de contenido
 
-`feeds RSS/Atom configurados → fetch/parse acotado → validación de frescura/fuente → normalización del resumen del feed → generación por IA → validación de salida estructurada → handoff duradero del Harvester → spool/retry del Publisher → Supabase/PostgreSQL → frontend`
+`feeds RSS/Atom configurados → consulta/análisis acotados → validación de vigencia/fuente → normalización del resumen del feed → generación por IA → validación de salida estructurada → transferencia duradera del Harvester → spool/reintentos del Publisher → Supabase/PostgreSQL → frontend`
 
-Cada invocación del Harvester es un **lote finito**. El repositorio no versiona un loop de polling continuo ni un scheduler de ingestión. El valor de 24 horas es una ventana de frescura, `Infrastructure/Run-LMN-Batch.ps1` es un orquestador explícito de lotes y la revalidación del frontend no define la cadencia de ingestión.
+Cada invocación del Harvester es un **lote finito**. El repositorio no versiona un bucle de sondeo continuo ni un planificador de ingestión. El valor de 24 horas es una ventana de vigencia, `Infrastructure/Run-LMN-Batch.ps1` es un orquestador explícito de lotes y la revalidación del frontend no define la cadencia de ingestión.
 
 ## Aspectos técnicos destacados
 
-- **Ingestión basada en el resumen del feed.** La generación normal usa el texto normalizado de `summary` de la entrada RSS/Atom y URLs de fuente duraderas; no obtiene la página completa del artículo del publisher.
+- **Ingestión basada en el resumen del feed.** La generación normal usa el texto normalizado de `summary` de la entrada RSS/Atom y URLs de fuente duraderas; no obtiene la página completa del artículo de la fuente editora.
 - **Límite de IA configurable.** `OLLAMA_API_URL` selecciona el endpoint del proveedor. Ollama local es la convención de despliegue predeterminada documentada, no una garantía arquitectónica de que la inferencia permanezca local.
 - **Validación de salida estructurada.** La salida de IA debe satisfacer el contrato esperado de JSON/campos del artículo antes de entrar en la ruta de publicación.
-- **Ownership duradero de colas.** Los claims del Harvester y los archivos inbox/processing del Publisher usan identidad específica para que la limpieza no elimine trabajo más nuevo en un pathname anteriormente compartido.
-- **Retry acotado e idempotencia.** Los retries del Publisher usan evidencia estructurada de transitoriedad, metadata duradera, cuarentena y unicidad de base de datos en `news.source_url`.
-- **Auth + membership administrativa + RLS.** Supabase Auth establece identidad, los checks server-side requieren `public.admin_users` y PostgreSQL RLS restringe de forma independiente las mutaciones expuestas al navegador.
-- **CI determinista.** Las pruebas críticas usan fixtures del repositorio y servicios locales/desechables en vez de depender de feeds reales, Supabase de producción, Ollama, GPU o Hyper-V.
-- **Límite explícito de scheduling.** No se versiona ningún scheduler ni loop continuo de ingestión; el filtro de frescura no debe describirse como cadencia de ejecución.
+- **Posesión duradera de colas.** Los trabajos del Harvester y los archivos inbox/processing del Publisher usan identidad específica para que la limpieza no elimine trabajo más nuevo en una ruta anteriormente compartida.
+- **Reintentos acotados e idempotencia.** Los reintentos del Publisher usan evidencia estructurada de transitoriedad, metadatos duraderos, cuarentena y unicidad de base de datos en `news.source_url`.
+- **Auth + pertenencia administrativa + RLS.** Supabase Auth establece identidad, las comprobaciones del lado del servidor exigen `public.admin_users` y PostgreSQL RLS restringe de forma independiente las mutaciones expuestas al navegador.
+- **CI determinista.** Las pruebas críticas usan datos de prueba del repositorio y servicios locales/desechables en vez de depender de feeds reales, Supabase de producción, Ollama, GPU o Hyper-V.
+- **Límite explícito de planificación.** No se versiona ningún planificador ni bucle continuo de ingestión; el filtro de vigencia no debe describirse como cadencia de ejecución.
 
 ## Interfaz
 
@@ -79,16 +79,16 @@ Las capturas representativas propiedad del repositorio se muestran con un ancho 
   <img src="../../assets/readme/home.png" width="900" alt="Página principal del portal público de Little Mere News">
 </p>
 
-### Dashboard administrativo
+### Panel administrativo
 
 <p align="center">
-  <img src="../../assets/readme/dashboard.png" width="900" alt="Dashboard administrativo de Little Mere News">
+  <img src="../../assets/readme/dashboard.png" width="900" alt="Panel administrativo de Little Mere News">
 </p>
 
-### Login administrativo
+### Inicio de sesión administrativo
 
 <p align="center">
-  <img src="../../assets/readme/login.png" width="900" alt="Login administrativo de Little Mere News">
+  <img src="../../assets/readme/login.png" width="900" alt="Inicio de sesión administrativo de Little Mere News">
 </p>
 
 ### Gestión de artículos del CMS
@@ -99,9 +99,9 @@ Las capturas representativas propiedad del repositorio se muestran con un ancho 
 
 ## Límite de IA / editorial
 
-La generación normal de artículos del Harvester requiere una respuesta válida de IA; no existe un fallback de contenido bruto ni un fallback sin IA que cree silenciosamente un artículo normal cuando falla el proveedor.
+La generación normal de artículos del Harvester requiere una respuesta válida de IA; no existe una ruta alternativa con contenido bruto ni una ruta sin IA que cree silenciosamente un artículo normal cuando falla el proveedor.
 
-La salida de IA puede contener errores factuales o hallucinations, omitir contexto o sufrir drift durante paráfrasis, traducción o localización. La validación de salida estructurada verifica la forma del payload, **no la exactitud factual**, y el repositorio no implementa fact-checking independiente. Los extractos de feeds también pueden estar incompletos o truncados. El publisher/fuente original sigue siendo la referencia autoritativa para el contexto completo y el significado editorial.
+La salida de IA puede contener errores factuales o alucinaciones, omitir contexto o presentar desviaciones durante la paráfrasis, traducción o localización. La validación de salida estructurada verifica la forma del payload, **no la exactitud factual**, y el repositorio no implementa verificación de hechos independiente. Los extractos de feeds también pueden estar incompletos o truncados. El editor/fuente original sigue siendo la referencia autoritativa para el contexto completo y el significado editorial.
 
 Como `OLLAMA_API_URL` es configurable, un despliegue local con Ollama es una convención de la topología documentada, no una garantía de que toda inferencia sea local.
 
@@ -116,50 +116,50 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Configura los valores públicos de Supabase y `ADMIN_PHANTOM_PATH` en `.env.local`. Mantén `SUPABASE_SERVICE_ROLE_KEY` solo en el servidor y nunca la expongas mediante `NEXT_PUBLIC_*`, código del navegador, capturas, logs o archivos versionados.
+Configura los valores públicos de Supabase y `ADMIN_PHANTOM_PATH` en `.env.local`. Mantén `SUPABASE_SERVICE_ROLE_KEY` solo en el servidor y nunca la expongas mediante `NEXT_PUBLIC_*`, código del navegador, capturas, registros o archivos versionados.
 
-Para el contrato de runtime del repositorio, setup de base de datos, workers Python y verificación clean-room, consulta la [documentación de deployment](../../operations/DEPLOYMENT.md). Los comandos deterministas de pruebas locales están en [testing](../../assurance/TESTING.md).
+Para el contrato de ejecución del repositorio, configuración de la base de datos, workers Python y verificación en entorno limpio, consulta la [documentación de despliegue](../../operations/DEPLOYMENT.md). Los comandos deterministas de pruebas locales están en [pruebas](../../assurance/TESTING.md).
 
 ## Calidad y seguridad
 
-La seguridad **no depende** de una URL administrativa difícil de adivinar. `ADMIN_PHANTOM_PATH` es solo oscuridad de URL y no es autenticación, autorización ni un límite de seguridad.
+La seguridad **no depende** de una URL administrativa difícil de adivinar. `ADMIN_PHANTOM_PATH` solo oculta la ruta y no constituye autenticación, autorización ni un límite de seguridad.
 
 El acceso administrativo se aplica mediante tres capas distintas:
 
 1. Supabase Auth establece la sesión autenticada.
-2. La autorización server-side comprueba membership explícita en `public.admin_users`.
+2. La autorización del lado del servidor comprueba la pertenencia explícita a `public.admin_users`.
 3. PostgreSQL RLS restringe de forma independiente las escrituras expuestas al navegador a administradores autenticados.
 
-La CI ejercita calidad de build/tipos del frontend, pruebas deterministas de Harvester y Publisher, contratos de migrations/RLS de PostgreSQL, E2E/accesibilidad en navegador, auditoría de dependencias, committed-secret scanning y CodeQL. Un gate exitoso es evidencia de la propiedad que ejecuta, no una garantía universal de preparación para producción o seguridad.
+La CI ejercita calidad de compilación/tipos del frontend, pruebas deterministas de Harvester y Publisher, contratos de migraciones/RLS de PostgreSQL, E2E/accesibilidad en navegador, auditoría de dependencias, detección de secretos versionados y CodeQL. Un control superado es evidencia de la propiedad que ejecuta, no una garantía universal de preparación para producción o seguridad.
 
-Consulta [seguridad de red outbound](../../security/OUTBOUND_NETWORK_SECURITY.md) y [testing/assurance](../../assurance/TESTING.md) para los límites detallados.
+Consulta [seguridad de red saliente](../../security/OUTBOUND_NETWORK_SECURITY.md) y [pruebas/garantía](../../assurance/TESTING.md) para los límites detallados.
 
 ## Documentación
 
-El [hub de documentación técnica](../../README.md) es el índice canónico para el material de ingeniería detallado.
+El [centro de documentación técnica](../../README.md) es el índice canónico para el material de ingeniería detallado.
 
-- [Seguridad — límite de confianza de feeds outbound](../../security/OUTBOUND_NETWORK_SECURITY.md)
-- [Fiabilidad — ownership de la cola del Publisher](../../reliability/PUBLISHER_QUEUE_OWNERSHIP.md)
-- [Fiabilidad — política de retry del Publisher](../../reliability/PUBLISHER_RETRY_POLICY.md)
-- [Operaciones — deployment y contrato de runtime clean-room](../../operations/DEPLOYMENT.md)
-- [Assurance — pruebas deterministas](../../assurance/TESTING.md)
+- [Seguridad — límite de confianza de feeds salientes](../../security/OUTBOUND_NETWORK_SECURITY.md)
+- [Fiabilidad — posesión de la cola del Publisher](../../reliability/PUBLISHER_QUEUE_OWNERSHIP.md)
+- [Fiabilidad — política de reintentos del Publisher](../../reliability/PUBLISHER_RETRY_POLICY.md)
+- [Operaciones — despliegue y contrato de ejecución en entorno limpio](../../operations/DEPLOYMENT.md)
+- [Garantía — pruebas deterministas](../../assurance/TESTING.md)
 
 La documentación técnica detallada sigue siendo canónica en inglés; la presentación pública del proyecto se mantiene en cuatro idiomas.
 
 ## Limitaciones operativas
 
-- Los publishers externos y feeds pueden cambiar metadata, disponibilidad, redirects o comportamiento de rate limit sin aviso.
-- La generación normal del Harvester requiere una respuesta válida de IA; la salida de IA no es verdad factual autoritativa.
-- Las ejecuciones del Harvester son lotes finitos. No se versiona ningún scheduler ni loop continuo de polling, y la ventana de frescura de 24 horas no es una cadencia de ingestión.
-- Los fixtures deterministas y la CI no sustituyen smoke checks específicos del despliegue para Supabase de producción, red, DNS, disponibilidad del proveedor o configuración de plataforma.
-- Las migrations de producción deben revisarse contra los datos existentes; la migration de unicidad intencionadamente no elimina duplicados de forma silenciosa.
-- La orquestación Hyper-V es opcional y específica del entorno, no el único camino de desarrollo/runtime soportado.
+- Las fuentes editoras externas y los feeds pueden cambiar metadatos, disponibilidad, redirecciones o comportamiento de límites de solicitudes sin aviso.
+- La generación normal del Harvester requiere una respuesta válida de IA; la salida de IA no es una verdad factual autoritativa.
+- Las ejecuciones del Harvester son lotes finitos. No se versiona ningún planificador ni bucle continuo de sondeo, y la ventana de vigencia de 24 horas no es una cadencia de ingestión.
+- Los datos de prueba deterministas y la CI no sustituyen comprobaciones rápidas específicas del despliegue para Supabase de producción, red, DNS, disponibilidad del proveedor o configuración de plataforma.
+- Las migraciones de producción deben revisarse frente a los datos existentes; la migración de unicidad no elimina duplicados de forma silenciosa de manera intencionada.
+- La orquestación Hyper-V es opcional y específica del entorno, no la única ruta admitida de desarrollo/ejecución.
 
 ## Licencia / límite de contenido de terceros
 
-El repositorio usa la **Licencia MIT** estándar para el software y los materiales originales del proyecto, en la medida aplicable. La licencia MIT **no relicencia** artículos de publishers, contenido de feeds RSS/Atom de terceros, logos o marcas de terceros ni material editorial externo.
+El repositorio usa la **Licencia MIT** estándar para el software y los materiales originales del proyecto, en la medida aplicable. La licencia MIT **no relicencia** artículos de editores, contenido de feeds RSS/Atom de terceros, logos o marcas de terceros ni material editorial externo.
 
-Los derechos sobre contenido externo siguen sujetos a los términos aplicables de cada fuente y a sus respectivos titulares. Consumir o analizar un feed RSS/Atom **no**, por sí mismo, concede derechos de republicación ni establece permiso para reutilizar contenido del publisher.
+Los derechos sobre contenido externo siguen sujetos a los términos aplicables de cada fuente y a sus respectivos titulares. Consumir o analizar un feed RSS/Atom **no**, por sí mismo, concede derechos de republicación ni establece permiso para reutilizar contenido del editor.
 
 Consulta [LICENSE](../../../LICENSE) para la licencia del software del repositorio.
 
