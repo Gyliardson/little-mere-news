@@ -71,6 +71,6 @@ Residual trust remains: the verified Ollama installer itself downloads the selec
 
 ## Other trust boundaries
 
-The batch runtime separately requires strict SSH host-key verification and Publisher-side secret provisioning as described in [`../docs/deployment.md`](../docs/deployment.md). Do not weaken those controls to simplify local setup.
+The batch runtime separately requires strict SSH host-key verification and Publisher-side secret provisioning as described in [`../docs/operations/DEPLOYMENT.md`](../docs/operations/DEPLOYMENT.md). Do not weaken those controls to simplify local setup.
 
 `ssh-keyscan` is not sufficient to establish trust by itself. Verify VM host-key fingerprints through a separate trusted channel before enrolling them in the operational `known_hosts` file.
