@@ -6,7 +6,7 @@
 
 Little Mere News combina um portal e CMS em Next.js, ingestão finita de RSS/Atom em Python, uma fronteira configurável de provedor de IA, filas duráveis de publicação e controles de autorização em Supabase/PostgreSQL.
 
-[English](../../../README.md) · [Português](README.md) · [日本語](../ja/README.md) · [Español](../es/README.md)
+<a href="../../../README.md">English</a> · <strong>Português</strong> · <a href="../ja/README.md">日本語</a> · <a href="../es/README.md">Español</a>
 
 [![CI](https://github.com/Gyliardson/little-mere-news/actions/workflows/ci.yml/badge.svg)](https://github.com/Gyliardson/little-mere-news/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../../LICENSE)
