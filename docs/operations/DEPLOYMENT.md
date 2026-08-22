@@ -99,7 +99,7 @@ A producer can enqueue B while A is processing. A's cleanup targets `processing/
 
 A crash during staging/write does not expose a partial final inbox batch. A crash after `inbox → processing` leaves processing state discoverable and recoverable. Replaying an identical batch id while it is still present is idempotent; replay after an ambiguous database write converges through the database `UNIQUE (source_url)`/upsert contract.
 
-`LMN_RETRY_FILE` remains separate from spool batch files. Automatic provider retry is deliberately bounded and conservative: transport failures plus explicit HTTP `408`, `429`, `500`, `502`, `503`, and `504` are retryable when structured status metadata is available; validation, schema, authorization/RLS, and other unclassified failures are quarantined for operator review. See [`publisher-retry-policy.md`](publisher-retry-policy.md) for the exact classification and deterministic coverage.
+`LMN_RETRY_FILE` remains separate from spool batch files. Automatic provider retry is deliberately bounded and conservative: transport failures plus explicit HTTP `408`, `429`, `500`, `502`, `503`, and `504` are retryable when structured status metadata is available; validation, schema, authorization/RLS, and other unclassified failures are quarantined for operator review. See [Publisher retry policy](../reliability/PUBLISHER_RETRY_POLICY.md) for the exact classification and deterministic coverage.
 
 ### Durable handoff lifecycle
 
@@ -119,7 +119,7 @@ Crash/restart semantics:
 - after Publisher processing claim: processing file is recovered before new inbox work;
 - after successful DB write but before processing-file cleanup: replay converges via `source_url` idempotency.
 
-See [`publisher-queue-ownership.md`](publisher-queue-ownership.md) for the detailed invariants and deterministic interleaving tests.
+See [Publisher queue ownership](../reliability/PUBLISHER_QUEUE_OWNERSHIP.md) for the detailed invariants and deterministic interleaving tests.
 
 ## Optional Hyper-V topology
 

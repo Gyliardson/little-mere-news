@@ -1,96 +1,111 @@
+<div align="center">
+
 # Little Mere News
 
-[![en](https://img.shields.io/badge/lang-en-red.svg)](README.md)
-[![pt-br](https://img.shields.io/badge/lang-pt--br-green.svg)](README.pt-br.md)
+**A deterministic technology-news pipeline with explicit AI, queue, and authorization boundaries.**
 
-Little Mere News is a bilingual technology-news platform that combines a Next.js portal and CMS, a Python ingestion/processing pipeline, Supabase/PostgreSQL, and an Ollama-compatible AI provider boundary for Harvester article generation. The documented Ollama topology is local by default, but the provider endpoint is configurable. Frontend operation, builds, CI, deterministic tests, and clean-room verification do not require AI/Ollama; the normal Harvester article-generation path does require a valid AI response to produce a new article payload.
+Little Mere News combines a Next.js portal and CMS, finite Python RSS/Atom ingestion, a configurable AI provider boundary, durable publication queues, and Supabase/PostgreSQL authorization controls.
+
+[English](README.md) · [Português](docs/i18n/pt-BR/README.md) · [日本語](docs/i18n/ja/README.md) · [Español](docs/i18n/es/README.md)
+
+[![CI](https://github.com/Gyliardson/little-mere-news/actions/workflows/ci.yml/badge.svg)](https://github.com/Gyliardson/little-mere-news/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+</div>
+
+## Overview
+
+Little Mere News turns configured RSS/Atom feed summaries into bilingual English/Portuguese article payloads, validates the generated structure, hands work across crash-recoverable queues, and publishes through a controlled Supabase/PostgreSQL boundary for the public portal and administrative CMS.
+
+The repository separates source ingestion, AI-assisted generation, publication, database authorization, and frontend delivery so each boundary can be reviewed and tested independently.
+
+## Why Little Mere News?
+
+| Deterministic feed ingestion | Explicit AI / editorial boundary | Durable publication integrity |
+| --- | --- | --- |
+| Bounded RSS/Atom fetches, source/freshness validation, finite Harvester batches, and deterministic fixtures keep critical verification independent from live feeds. | AI generation is explicit and configurable; schema validation constrains payload shape without claiming factual verification. | Immutable handoff identity, bounded retry/quarantine behavior, and database uniqueness protect work across crashes, retries, and replay. |
+
+## Core capabilities
+
+- Next.js App Router public technology-news portal and administrative CMS;
+- bilingual English/Portuguese article payloads generated from configured RSS/Atom **feed summaries**;
+- finite Harvester execution with bounded external-feed transport and SSRF-oriented destination controls;
+- configurable Ollama-compatible AI provider boundary for normal article generation;
+- durable Harvester claims and Publisher inbox/processing ownership;
+- bounded Publisher retry, durable quarantine, replay-safe `source_url` idempotency, and upsert behavior;
+- Supabase Auth, explicit `public.admin_users` membership, server-side authorization, and PostgreSQL RLS;
+- deterministic frontend, Python, PostgreSQL, browser, dependency, secret-scanning, and CodeQL gates.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-  S[External sources] --> H[Python Harvester]
-  H --> A[AI provider boundary]
-  A --> Q[Validated JSON queue]
-  Q --> P[Python Publisher]
-  P --> DB[(Supabase/PostgreSQL)]
-  DB --> W[Next.js SSR portal]
-  DB --> C[Admin CMS]
+    Feeds["Configured RSS / Atom feeds"] --> Harvester["Python Harvester<br/>finite bounded batch"]
+    Harvester --> AI["Configurable AI provider<br/>Ollama-compatible boundary"]
+    AI --> Validate["Structured-output validation"]
+    Validate --> Queue["Durable handoff<br/>Publisher spool"]
+    Queue --> Publisher["Python Publisher<br/>retry + idempotent upsert"]
+    Publisher --> DB[(Supabase / PostgreSQL)]
+    DB --> Portal["Next.js SSR portal"]
+    DB --> CMS["Admin CMS"]
 ```
 
-The repository contains:
-
-- `frontend-web/` — Next.js App Router portal and administrative CMS;
-- `Backend-Harvester/` — RSS/Atom feed ingestion and AI-backed article generation;
-- `Backend-Publisher/` — validated, retry-safe publishing to Supabase;
-- `supabase/migrations/` — versioned database schema, constraints and RLS policies;
-- `supabase/tests/` — deterministic PostgreSQL security/contract tests;
-- `Infrastructure/` — optional Hyper-V/local orchestration scripts;
-- `.github/workflows/ci.yml` — frontend, Python, PostgreSQL and blocking frontend dependency quality gates;
-- `.github/workflows/browser-e2e.yml` — deterministic Chromium E2E and accessibility regressions;
-- `.github/workflows/security.yml` — Python dependency and committed-secret verification;
-- `.github/workflows/codeql.yml` — static analysis for JavaScript/TypeScript and Python.
+The Harvester processes configured feed data rather than downloading full publisher article pages. Database state and authorization are versioned under `supabase/`, while the optional Hyper-V/Ollama topology remains a deployment choice rather than an architectural prerequisite.
 
 ## Content pipeline
 
-The current data flow is:
+`configured RSS/Atom feeds → bounded fetch/parse → freshness/source validation → feed-summary normalization → AI generation → structured-output validation → durable Harvester handoff → Publisher spool/retry → Supabase/PostgreSQL → frontend`
 
-`configured RSS/Atom feeds → bounded feed fetch/parse → freshness/source validation → feed-summary normalization → AI generation → structured-output validation → durable Harvester queue → Publisher → Supabase/PostgreSQL → frontend`
+Each Harvester invocation is a **finite batch pass**. The repository does not version a continuous polling loop or ingestion scheduler. The 24-hour value is a freshness window, `Infrastructure/Run-LMN-Batch.ps1` is an explicit batch orchestrator, and frontend revalidation does not define ingestion cadence.
 
-The Harvester processes configured feed data; it does not download full publisher article pages. Each Harvester invocation performs a finite batch pass. The repository does not version a continuous polling loop or an ingestion scheduler: the 24-hour window is a freshness filter, `Infrastructure/Run-LMN-Batch.ps1` is a batch orchestrator, and frontend revalidation is not an ingestion cadence.
+## Technical highlights
 
-Normal Harvester article generation has no raw-content or non-AI generation fallback. `OLLAMA_API_URL` is configurable, so "local AI" describes the default deployment convention rather than an architectural guarantee that inference remains local. AI output can contain factual errors or hallucinations, omit context, or drift during paraphrase, translation, or localization. Structured-output validation checks payload structure, not factual accuracy, and the repository does not implement independent fact-checking. Feed excerpts or truncation can further limit context; the original source remains the reference for complete context.
+- **Feed-summary-based ingestion.** Normal generation uses normalized RSS/Atom entry summary text and durable source URLs; it does not fetch the complete publisher article page.
+- **Configurable AI boundary.** `OLLAMA_API_URL` selects the provider endpoint. Local Ollama is the documented default deployment convention, not an architectural guarantee that inference remains local.
+- **Structured-output validation.** AI output must satisfy the expected JSON/article field contract before entering the publication path.
+- **Durable queue ownership.** Harvester claims and Publisher inbox/processing files use identity-specific ownership so cleanup cannot delete newer work at a formerly shared pathname.
+- **Bounded retry and idempotency.** Publisher retries use structured transient evidence, durable retry metadata, quarantine, and database uniqueness on `news.source_url`.
+- **Auth + admin membership + RLS.** Supabase Auth establishes identity, server-side checks require `public.admin_users`, and PostgreSQL RLS independently constrains browser-facing mutations.
+- **Deterministic CI.** Critical tests use repository-owned fixtures and disposable/local services instead of depending on live feeds, production Supabase, Ollama, GPU, or Hyper-V.
+- **Explicit scheduling boundary.** No scheduler or continuous ingestion loop is versioned; freshness filtering must not be described as execution cadence.
 
-External source content is treated as untrusted and mutable. Critical tests use deterministic fixtures instead of requiring live feeds. AI output is structurally validated before it can enter the publish path, and publisher retries preserve failed items instead of deleting the only copy after a partial failure.
+## Interface
 
-## Security model
+Representative repository-owned screenshots are shown at a legible width rather than compressed into a dense two-column layout.
 
-Security does **not** depend on a secret URL.
+### Public portal
 
-The project uses three separate controls:
+<p align="center">
+  <img src="docs/assets/readme/home.png" width="900" alt="Little Mere News public portal home">
+</p>
 
-1. **Supabase Auth** establishes the authenticated user session.
-2. **Server-side authorization** requires explicit membership in `public.admin_users` before dashboard access or privileged server actions are allowed.
-3. **PostgreSQL Row Level Security (RLS)** independently restricts browser-facing writes to authenticated users whose `auth.uid()` is present in `public.admin_users`.
+### Administrative dashboard
 
-`ADMIN_PHANTOM_PATH` only changes the administrative URL. It may reduce trivial bot/scanner noise, but it is **not authentication, authorization, or a security boundary**. The application must remain secure if that path becomes public.
+<p align="center">
+  <img src="docs/assets/readme/dashboard.png" width="900" alt="Little Mere News administrative dashboard">
+</p>
 
-The local publisher uses a server-side Supabase credential. Service-role credentials must never be exposed to browser code, public environment variables, screenshots, CI logs, or committed files.
+### Administrative login
 
-### Database contract
+<p align="center">
+  <img src="docs/assets/readme/login.png" width="900" alt="Little Mere News administrative login">
+</p>
 
-Database state is versioned in GitHub under `supabase/migrations/`.
+### CMS article management
 
-Current security and integrity guarantees include:
+<p align="center">
+  <img src="docs/assets/readme/cms_list.png" width="900" alt="Little Mere News CMS article list">
+</p>
 
-- public `SELECT` access to `news` for `anon` and `authenticated` roles;
-- `INSERT`, `UPDATE`, and `DELETE` on `news` allowed through RLS only for users listed in `admin_users`;
-- ordinary authenticated users cannot create their own admin membership;
-- `news.source_url` is unique, providing the durable idempotency contract used by the publisher.
+## AI / editorial boundary
 
-The deterministic SQL contract in `supabase/tests/rls_contract.sql` exercises anonymous, ordinary authenticated, and administrator behavior against a disposable PostgreSQL instance.
+Normal Harvester article generation requires a valid AI response; there is no raw-content or non-AI fallback that silently creates a normal generated article when the provider fails.
 
-## CI and tests
+AI output can contain factual errors or hallucinations, omit context, or drift during paraphrase, translation, or localization. Structured-output validation verifies payload shape, **not factual accuracy**, and the repository does not implement independent fact-checking. Feed excerpts may also be incomplete or truncated. The original publisher/source remains authoritative for complete context and editorial meaning.
 
-GitHub Actions runs independent gates for:
+Because `OLLAMA_API_URL` is configurable, a local Ollama deployment is a convention of the documented topology rather than a guarantee that all inference is local.
 
-- frontend dependency audits, lint, TypeScript typecheck, and production build;
-- deterministic Harvester tests;
-- deterministic Publisher tests;
-- PostgreSQL migration/RLS contract tests;
-- Chromium browser E2E for locale handling, public failure states, unauthenticated routing, ordinary-user authorization denial, and administrator access;
-- browser accessibility regressions for labels, keyboard navigation, dialog semantics, focus restoration, and representative structural checks;
-- Python dependency auditing;
-- full-history committed-secret scanning with a pinned/checksummed Gitleaks binary;
-- commit-pinned CodeQL analysis for JavaScript/TypeScript and Python.
-
-Browser tests run the production Next.js server against a repository-owned loopback Supabase HTTP fixture. The fixture uses synthetic users and news records only; no production credentials, production Supabase project, live feeds, Ollama, GPU, or Hyper-V environment are required. Failure runs preserve application/fixture logs and a diagnostic screenshot as short-lived GitHub Actions artifacts.
-
-The checked-in frontend package manifests are the audited dependency state. Both production-only and full-tree npm audits are blocking CI checks at high severity or above; a generated candidate is never treated as a passing security claim until its manifests are committed.
-
-See [`docs/testing.md`](docs/testing.md) for deterministic test execution and [`docs/deployment.md`](docs/deployment.md) for the deploy/runtime and clean-room contract.
-
-## Local setup
+## Quick Start
 
 ### Frontend
 
@@ -101,53 +116,53 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Configure the Supabase public URL/key and `ADMIN_PHANTOM_PATH` in `.env.local`. Do not place a service-role key in browser-exposed variables. The frontend-specific environment, production build/start, healthcheck and E2E commands are documented in [`frontend-web/README.md`](frontend-web/README.md).
+Configure the public Supabase values and `ADMIN_PHANTOM_PATH` in `.env.local`. Keep `SUPABASE_SERVICE_ROLE_KEY` server-only and never expose it through `NEXT_PUBLIC_*`, browser code, screenshots, logs, or committed files.
 
-### Python services
+For the repository-wide runtime contract, database setup, Python workers, and clean-room verification, use the [deployment documentation](docs/operations/DEPLOYMENT.md). Deterministic local test commands are in [testing](docs/assurance/TESTING.md).
 
-Each Python service owns its dependencies. For deterministic development/testing, use the repository test requirements and fixtures rather than live external infrastructure where possible.
+## Quality & security
 
-### Database
+Security does **not** depend on a hard-to-guess administrative URL. `ADMIN_PHANTOM_PATH` is URL obscurity only and is not authentication, authorization, or a security boundary.
 
-Apply the SQL files in `supabase/migrations/` in filename order. The repository CI validates the same migration chain against PostgreSQL before exercising the RLS contract.
+Administrative access is enforced through three distinct layers:
 
-To grant administrative access in an environment, insert the intended authenticated user's UUID into `public.admin_users` using a trusted administrative/database channel. Do not expose a client-side self-enrollment path.
+1. Supabase Auth establishes the authenticated session.
+2. Server-side authorization checks explicit membership in `public.admin_users`.
+3. PostgreSQL RLS independently restricts browser-facing writes to authenticated administrators.
 
-### Optional local infrastructure
+The CI surface exercises frontend build/type quality, deterministic Harvester and Publisher tests, PostgreSQL migration/RLS contracts, browser E2E/accessibility checks, dependency auditing, committed-secret scanning, and CodeQL. A passing gate is evidence for the property it executes, not a universal production-readiness or security guarantee.
 
-`Infrastructure/` contains the original Windows/Hyper-V orchestration for the local Harvester/Brain/Publisher topology. It remains a supported deployment option, not a prerequisite for building or testing the repository. The local Ollama topology is also a deployment option; the Harvester provider endpoint itself is configurable.
+See [outbound network security](docs/security/OUTBOUND_NETWORK_SECURITY.md) and [testing/assurance](docs/assurance/TESTING.md) for the detailed boundaries.
 
-## Deployment and clean-room verification
+## Documentation
 
-Deployment is intentionally componentized: the Next.js frontend, Supabase/PostgreSQL, Harvester, Publisher, AI provider boundary and optional Hyper-V/local Ollama topology have distinct runtime boundaries. A clean-room validation must start from a fresh checkout, apply the documented environment and database contract, build/start the production frontend, verify `/api/health` as **Next.js process liveness only**, and then run the deterministic test suites. Provider readiness and external-feed availability require separate smoke checks.
+The [technical documentation hub](docs/README.md) is the canonical index for deeper engineering material.
 
-See [`docs/deployment.md`](docs/deployment.md) for the authoritative runbook and residual operational limitations.
+- [Security — outbound feed trust boundary](docs/security/OUTBOUND_NETWORK_SECURITY.md)
+- [Reliability — Publisher queue ownership](docs/reliability/PUBLISHER_QUEUE_OWNERSHIP.md)
+- [Reliability — Publisher retry policy](docs/reliability/PUBLISHER_RETRY_POLICY.md)
+- [Operations — deployment and clean-room runtime contract](docs/operations/DEPLOYMENT.md)
+- [Assurance — deterministic testing](docs/assurance/TESTING.md)
 
-## UI evidence
-
-The lightweight static evidence below replaces the former 20+ MB animated walkthrough while preserving representative public and administrative views.
-
-| Public portal | Administrative dashboard |
-| :---: | :---: |
-| <img src="docs/assets/readme/home.png" width="400" alt="Public portal home"> | <img src="docs/assets/readme/dashboard.png" width="400" alt="Administrative dashboard"> |
-
-| Login | CMS article management |
-| :---: | :---: |
-| <img src="docs/assets/readme/login.png" width="400" alt="Administrative login"> | <img src="docs/assets/readme/cms_list.png" width="400" alt="CMS article list"> |
+Deep technical documentation remains canonical in English; the visitor-facing project overview is maintained in four languages.
 
 ## Operational limitations
 
-- External publishers and feeds can change metadata, availability, or rate behavior without notice.
-- Normal Harvester content generation requires a valid AI response. AI/Ollama is not required for the frontend, build, CI, deterministic tests, or clean-room verification, and `OLLAMA_API_URL` makes inference locality deployment-dependent.
-- Harvester executions are finite batches. No scheduler or continuous polling loop is versioned in this repository, and the freshness window must not be interpreted as ingestion cadence.
-- AI output can contain errors, hallucinations, omissions, or paraphrase/translation/localization drift; structural validation is not factual verification and no independent fact-checking is implemented.
-- The browser Supabase fixture is a deterministic contract double, not a replacement for a production-environment smoke test.
-- Dependency scanners depend on upstream advisory data and cannot prove the absence of undisclosed or not-yet-published vulnerabilities.
-- Production Supabase migrations must be reviewed against existing data before deployment; the uniqueness migration intentionally does not silently delete duplicate records.
-- Hyper-V orchestration is environment-specific and should not be treated as the only supported development path.
+- External publishers and feeds can change metadata, availability, redirects, or rate behavior without notice.
+- Normal Harvester generation requires a valid AI response; AI output is not authoritative factual truth.
+- Harvester executions are finite batches. No scheduler or continuous polling loop is versioned, and the 24-hour freshness window is not an ingestion cadence.
+- Deterministic fixtures and CI do not replace deployment-specific smoke checks for production Supabase, networking, DNS, provider availability, or platform configuration.
+- Production migrations must be reviewed against existing data; the uniqueness migration intentionally does not silently delete duplicate records.
+- Hyper-V orchestration is optional and environment-specific, not the only supported development/runtime path.
 
-## License
+## License / third-party content boundary
 
-The repository uses the standard MIT License for the software and original project materials to the extent applicable. That license does **not** relicense publisher articles, third-party feed content, third-party trademarks or logos, or external editorial material. Source-specific rights remain subject to the respective terms and rightsholders; consuming an RSS/Atom feed is not, by itself, a statement about republication permission or infringement.
+The repository uses the standard **MIT License** for the software and original project material to the extent applicable. The MIT license **does not relicense** publisher articles, third-party RSS/Atom feed content, third-party logos or trademarks, or external editorial material.
 
-See [LICENSE](LICENSE) for the repository's software licensing terms.
+Rights in external content remain subject to the applicable source terms and rightsholders. Consuming or parsing an RSS/Atom feed does **not**, by itself, grant republication rights or establish permission to reuse publisher content.
+
+See [LICENSE](LICENSE) for the repository software license.
+
+## Author
+
+**Gyliardson Keitison** · [GitHub](https://github.com/Gyliardson) · [LinkedIn](https://www.linkedin.com/in/gyliardson-keitison)

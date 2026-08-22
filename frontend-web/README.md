@@ -69,7 +69,7 @@ Browser tests run the production Next.js server against `e2e/fake-supabase.mjs`,
 
 This boundary proves public routing/states, authentication/authorization flows and representative CMS accessibility without production secrets or a live Supabase project.
 
-See [`../docs/testing.md`](../docs/testing.md) for exact local commands and test limitations.
+See [`../docs/assurance/TESTING.md`](../docs/assurance/TESTING.md) for exact local commands and test limitations.
 
 ## Database and admin bootstrap
 
@@ -88,7 +88,7 @@ A frontend deployment needs:
 
 The Harvester, Publisher and optional Ollama runtime are independent components and do not need to run inside the frontend host.
 
-See [`../docs/deployment.md`](../docs/deployment.md) for the repository-wide runtime/deployment contract.
+See [`../docs/operations/DEPLOYMENT.md`](../docs/operations/DEPLOYMENT.md) for the repository-wide runtime/deployment contract.
 
 ## Security and testing
 
