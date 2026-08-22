@@ -6,7 +6,7 @@
 
 Little Mere News は、Next.js のポータル/CMS、有限の Python RSS/Atom 取り込み、設定可能な AI プロバイダー境界、耐久性のある公開キュー、Supabase/PostgreSQL の認可制御を組み合わせたプロジェクトです。
 
-[English](../../../README.md) · [Português](../pt-BR/README.md) · [日本語](README.md) · [Español](../es/README.md)
+<a href="../../../README.md">English</a> · <a href="../pt-BR/README.md">Português</a> · <strong>日本語</strong> · <a href="../es/README.md">Español</a>
 
 [![CI](https://github.com/Gyliardson/little-mere-news/actions/workflows/ci.yml/badge.svg)](https://github.com/Gyliardson/little-mere-news/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../../LICENSE)
